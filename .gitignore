@@ -1,0 +1,20 @@
+# 素材图片库：约 2GB / 2846 张 PNG，属本地素材，不纳入版本库
+# 目录说明与元数据索引（README.md / _metadata.csv）仍保留，便于自备素材后对号入座
+*.png
+*.jpg
+*.jpeg
+*.webp
+
+# 运行时产物
+output/
+thumbs/
+__pycache__/
+*.py[cod]
+*.log
+
+# 本地环境 / 配置
+venv/
+.env
+.env.*
+.DS_Store
+Thumbs.db

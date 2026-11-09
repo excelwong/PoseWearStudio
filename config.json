@@ -1,0 +1,9 @@
+{
+  "comfy_url": "http://127.0.0.1:8188",
+  "library_root": ".",
+  "megapixels": 2.4,
+  "steps": 25,
+  "cfg": 1.0,
+  "ref_resolution": 1024,
+  "page_size": 60
+}
