@@ -1,0 +1,141 @@
+{
+  "__comment__": "API 格式样例：UC Q4_K_M GGUF 基模版，由 workflow.py build() 生成，可直接 POST /prompt（需先把 refs 里的 3 张图上传到 ComfyUI 的 input 目录，并安装 ComfyUI-GGUF 插件）。与 api_workflow_turbo_gguf_example.json 的差别只在节点 1 的 unet_name、clip_name 与 steps 三处，其余节点完全一致。",
+  "output_node_id": "32",
+  "prompt": {
+    "1": {
+      "class_type": "UnetLoaderGGUF",
+      "inputs": {
+        "unet_name": "qwen-image-2.1-UC-Q4_K_M.gguf"
+      }
+    },
+    "2": {
+      "class_type": "QwenImage21Cache",
+      "inputs": {
+        "model": [
+          "1",
+          0
+        ],
+        "device": "auto",
+        "dtype": "default"
+      }
+    },
+    "3": {
+      "class_type": "CLIPLoader",
+      "inputs": {
+        "clip_name": "qwen_image_2.1\\qwen3vl_8b_int8_convrot.safetensors",
+        "type": "qwen_image",
+        "device": "default"
+      }
+    },
+    "4": {
+      "class_type": "VAELoader",
+      "inputs": {
+        "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+      }
+    },
+    "10": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": "pws_person_example.png"
+      }
+    },
+    "11": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": "pws_costume_example.png"
+      }
+    },
+    "12": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": "pws_pose_example.png"
+      }
+    },
+    "20": {
+      "class_type": "TextEncodeQwenImage21",
+      "inputs": {
+        "clip": [
+          "3",
+          0
+        ],
+        "vae": [
+          "4",
+          0
+        ],
+        "prompt": "以 <image1> 中的成年女性为主角，严格保持她的面部特征、五官、发型发色、肤色与体型不变，生成一张自然写实的人像摄影照片。\n让她换上 <image2> 中展示的整套服装，精确还原款式、颜色、图案、面料质感与搭配（white shirt, black shorts）。\n让她的身体姿势、四肢位置、身体朝向与镜头角度完全参照 <image3>：seated leaning back，front视角。\n根据输出画幅合理构图，人物完整入画、手清晰可见、不裁切头脚，光线自然柔和，背景简洁干净，真实皮肤质感，高细节、高清晰度，专业人像摄影，无文字无水印。",
+        "negative_prompt": "服装错乱，姿势不符，多个人物，多余肢体，畸形的手指，面部变形，身份不一致，低分辨率，模糊，过曝，卡通，插画，3D 渲染，文字，水印，logo，边框",
+        "resolution": 1024,
+        "images.image_1": [
+          "10",
+          0
+        ],
+        "images.image_2": [
+          "11",
+          0
+        ],
+        "images.image_3": [
+          "12",
+          0
+        ]
+      }
+    },
+    "21": {
+      "class_type": "EmptyLatentImage",
+      "inputs": {
+        "width": 1344,
+        "height": 1792,
+        "batch_size": 1
+      }
+    },
+    "30": {
+      "class_type": "KSampler",
+      "inputs": {
+        "model": [
+          "2",
+          0
+        ],
+        "seed": 12345,
+        "steps": 25,
+        "cfg": 1.0,
+        "sampler_name": "euler",
+        "scheduler": "simple",
+        "positive": [
+          "20",
+          0
+        ],
+        "negative": [
+          "20",
+          1
+        ],
+        "latent_image": [
+          "21",
+          0
+        ],
+        "denoise": 1.0
+      }
+    },
+    "31": {
+      "class_type": "VAEDecode",
+      "inputs": {
+        "samples": [
+          "30",
+          0
+        ],
+        "vae": [
+          "4",
+          0
+        ]
+      }
+    },
+    "32": {
+      "class_type": "SaveImage",
+      "inputs": {
+        "images": [
+          "31",
+          0
+        ],
+        "filename_prefix": "PoseWearStudio/example"
+      }
+    }
+  }
+}

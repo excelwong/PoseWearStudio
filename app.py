@@ -24,11 +24,13 @@ from PyQt6.QtWidgets import (
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
 
-from config import CFG                                   # noqa: E402
+from config import (CFG, UNET_MODELS, CLIP_MODELS, VAE_MODELS,  # noqa: E402
+                    UNET_DEFAULTS)
 from catalog import Catalog                              # noqa: E402
 from resolution import RATIOS, TIERS, describe            # noqa: E402
 from workflow import (make_prompt, make_negative, ref_tags,  # noqa: E402
-                      validate_prompt, apply_keep_background, SCENE_TAIL, SCENE_TAIL_KEEP_BG)
+                      validate_prompt, apply_keep_background, scene_tail,
+                      keep_bg_tail, UPPER_BODY_SYSTEM, SCENE_TAIL_KEEP_BG)
 from thumbs import ThumbCache, ThumbWorker               # noqa: E402
 from generator import GenerateWorker                     # noqa: E402
 from comfy_client import ComfyClient                     # noqa: E402
@@ -52,8 +54,9 @@ QPushButton#primary { background:#2563eb; color:#ffffff; border:1px solid #2563e
                       font-size:12pt; font-weight:600; padding:11px 16px; }
 QPushButton#primary:hover { background:#1d4ed8; }
 QPushButton#primary:disabled { background:#9db4e8; border-color:#9db4e8; }
-QPushButton#ratio { padding:8px 4px; font-size:10pt; }
+QPushButton#ratio { padding:2px 4px; font-size:9pt; }
 QPushButton#ratio:checked { background:#2563eb; color:#ffffff; border-color:#2563eb; font-weight:600; }
+QGroupBox#ratioBox { padding:9px 8px 8px 8px; }
 QPushButton#keep { color:#2563eb; border-color:#bfcdec; }
 QPushButton#keep:checked { background:#2563eb; color:#ffffff; border-color:#2563eb; font-weight:600; }
 QListWidget { background:#ffffff; border:1px solid #e3e8ef; border-radius:8px; padding:6px; }
@@ -297,7 +300,7 @@ class Browser(QWidget):
             self.keep_btn.setChecked(False)
             self.selected = None
             self.list.clearSelection()
-            self.info.setText("已设为全裸（无服装，附加 completed_nude,huge_breasts,large_breasts,small_nipples）")
+            self.info.setText("已设为全裸（无服装，附加 completed_nude,slimthick body type with large prominent chest,with a slim waist and a full bust,huge_breasts,large_breasts,small_nipples,sparse_pubic_hair）")
         else:
             self.info.setText("未选择：请点选素材，或勾选「%s」" % self.keep_btn.text())
         self.selectionChanged.emit(None)
@@ -315,7 +318,7 @@ class CostumeBrowser(Browser):
         self.nude_btn = QPushButton("全裸 · 无服装")
         self.nude_btn.setObjectName("keep")
         self.nude_btn.setCheckable(True)
-        self.nude_btn.setToolTip("勾选后生成全裸人像（附加 completed_nude,huge_breasts,large_breasts,small_nipples）")
+        self.nude_btn.setToolTip("勾选后生成全裸人像（附加 completed_nude,slimthick body type with large prominent chest,with a slim waist and a full bust,huge_breasts,large_breasts,small_nipples,sparse_pubic_hair）")
         self.nude_btn.clicked.connect(self._toggle_nude)
         self.filter_bar.addWidget(self.nude_btn)
         self.cat = QComboBox()
@@ -341,6 +344,9 @@ class CostumeBrowser(Browser):
 
 
 class PoseBrowser(Browser):
+    """姿态库浏览器：系列变化时额外发信号，让提示词立即换成半身构图句。"""
+    systemChanged = pyqtSignal(str)
+
     def __init__(self, catalog, cache, page_size):
         self.catalog = catalog
         super().__init__(cache, page_size,
@@ -379,6 +385,7 @@ class PoseBrowser(Browser):
             self.angle.addItem("全部角度")
             self.angle.addItems(self.catalog.pose_angles())
         self.refresh()
+        self.systemChanged.emit(self.sys.currentText())
 
     def query(self):
         return self.catalog.filter_poses(self.sys.currentText(), self.cat.currentText(),
@@ -431,7 +438,7 @@ class MainWindow(QMainWindow):
         self.cfg = cfg
         self.catalog = catalog
         self.cache = ThumbCache(cfg["cache_dir"])
-        self.ratio = "3:4"
+        self.ratio = "2:3"
         self.megapixels = float(cfg["megapixels"])
         self.costume = None
         self.pose = None
@@ -505,6 +512,7 @@ class MainWindow(QMainWindow):
 
         self.pose_browser = PoseBrowser(self.catalog, self.cache, self.cfg["page_size"])
         self.pose_browser.selectionChanged.connect(self._on_pose)
+        self.pose_browser.systemChanged.connect(self._on_pose_system)
         tabs.addTab(self.pose_browser, "③ 选择姿态")
 
         # ---------- 三个 tab 之后：始终可见的附加选项 ----------
@@ -521,7 +529,8 @@ class MainWindow(QMainWindow):
         self.keep_bg_cb.setStyleSheet(
             "QCheckBox#keepbg { font-size:10pt; font-weight:600; color:#1e293b; }")
         self.keep_bg_cb.setToolTip(
-            "勾选后，提示词中的默认构图/光线/背景整句会替换为：%s" % SCENE_TAIL_KEEP_BG)
+            "勾选后，提示词中的默认构图/光线/背景整句会替换为：%s；"
+            "「上半身单人」系列会保留半身构图约束。" % SCENE_TAIL_KEEP_BG)
         self.keep_bg_cb.toggled.connect(self._on_keep_bg)
         bgl.addWidget(self.keep_bg_cb)
         self.bg_hint = QLabel()
@@ -539,24 +548,30 @@ class MainWindow(QMainWindow):
         lcl.addWidget(bg_bar)
 
         # ---------- 右侧：常用 / 高级两个 tab，控件在下方统一组装 ----------
+        # ---------- 输出画幅比例：9 个按钮竖向一列，备注只显示分辨率 ----------
         g_ratio = QGroupBox("输出画幅比例")
+        g_ratio.setObjectName("ratioBox")
         gl = QVBoxLayout(g_ratio)
-        grid = QGridLayout()
-        for i, key in enumerate(RATIOS):
+        gl.setContentsMargins(4, 4, 4, 4)
+        gl.setSpacing(3)
+        for key in RATIOS:
             b = QPushButton(key)
             b.setObjectName("ratio")
             b.setCheckable(True)
             b.setChecked(key == self.ratio)
+            b.setFixedHeight(22)
             b.clicked.connect(lambda _, k=key: self._set_ratio(k))
-            grid.addWidget(b, i // 3, i % 3)
+            gl.addWidget(b)
             self.ratio_buttons[key] = b
-        gl.addLayout(grid)
         self.res_label = QLabel()
         self.res_label.setObjectName("hint")
-        self.res_label.setWordWrap(True)
+        self.res_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         gl.addWidget(self.res_label)
+        gl.addStretch(1)
+        g_ratio.setMaximumWidth(214)
+        g_ratio.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
 
-        g_size = QGroupBox("生成分辨率（本机 RTX 5090 Laptop 24 GB）")
+        g_size = QGroupBox("生成分辨率")
         sl = QVBoxLayout(g_size)
         hl2 = QHBoxLayout()
         hl2.addWidget(QLabel("像素档位"))
@@ -597,6 +612,41 @@ class MainWindow(QMainWindow):
         for _w in (self.steps, self.cfgv, self.seed, self.refres):
             _w.setMinimumWidth(88)
 
+        # ---------- 模型选择：基模 / Text Encoder / VAE ----------
+        def _mk_combo(items, current):
+            combo = QComboBox()
+            for label, value in items:
+                combo.addItem(label, value)
+            # config.json 里若填了清单之外的名字，也作为额外项保留，不丢用户配置
+            if current and combo.findData(current) < 0:
+                combo.addItem(str(current), str(current))
+            if current:
+                i = combo.findData(current)
+                if i >= 0:
+                    combo.setCurrentIndex(i)
+            combo.setMinimumContentsLength(36)
+            return combo
+
+        self.unet_combo = _mk_combo(UNET_MODELS, self.cfg["unet"])
+        self.clip_combo = _mk_combo(CLIP_MODELS, self.cfg["clip"])
+        self.vae_combo = _mk_combo(VAE_MODELS, self.cfg["vae"])
+        self.unet_combo.setToolTip("扩散模型，位于 ComfyUI 的 models/diffusion_models/")
+        self.clip_combo.setToolTip("文本编码器，位于 models/text_encoders/qwen_image_2.1/")
+        self.vae_combo.setToolTip("Qwen-Image 2.1 只能用这个 VAE（唯一可选项）")
+
+        row = 2
+        for label, combo in (("基模", self.unet_combo),
+                             ("Text Encoder", self.clip_combo),
+                             ("VAE", self.vae_combo)):
+            pl2.addWidget(QLabel(label), row, 0)
+            pl2.addWidget(combo, row, 1, 1, 3)
+            row += 1
+
+        # 启动即按当前基模套用推荐组合；connect 放在后面，避免初始化误触发
+        self._apply_unet_default(self.unet_combo.currentData())
+        self.unet_combo.currentIndexChanged.connect(
+            lambda _i: self._apply_unet_default(self.unet_combo.currentData()))
+
         g_prompt = QGroupBox("提示词（可按需要修改）")
         vl = QVBoxLayout(g_prompt)
         self.mode_label = QLabel()
@@ -604,7 +654,12 @@ class MainWindow(QMainWindow):
         self.mode_label.setWordWrap(True)
         vl.addWidget(self.mode_label)
         self.prompt_edit = QPlainTextEdit()
-        self.prompt_edit.setFixedHeight(180)
+        # 原高度 180px；现在按最终字体行高再额外给出 2 行的可见空间，
+        # 并常显垂直滚动条，提示词更长时直接滚动查看，控件高度不再变动。
+        self.prompt_edit.ensurePolished()
+        line_h = max(1, self.prompt_edit.fontMetrics().lineSpacing())
+        self.prompt_edit.setFixedHeight(180 + 2 * line_h)
+        self.prompt_edit.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         vl.addWidget(self.prompt_edit)
 
         self.gen_btn = QPushButton("开始生成")
@@ -636,23 +691,37 @@ class MainWindow(QMainWindow):
         self.result_info.setObjectName("hint")
         self.result_info.setWordWrap(True)
         ol.addWidget(self.result_info)
-        ob = QHBoxLayout()
+        # 「打开输出目录」「另存为」改放左列比例组下方，
+        # 结果区只保留预览图与信息，最大化图片展示空间。
+
+        # 左列（比例列表 + 结果操作按钮）。注意：变量名不能叫 left_col / lcl，
+        # 这两个名字在 _build_ui 开头已用于左侧素材库栏，覆盖会令原栏失去引用被回收。
+        ratio_col = QWidget()
+        ratio_col.setMaximumWidth(214)
+        ratio_col.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+        ratio_lay = QVBoxLayout(ratio_col)
+        ratio_lay.setContentsMargins(0, 0, 0, 0)
+        ratio_lay.setSpacing(8)
+        ratio_lay.addWidget(g_ratio)
         bdir = QPushButton("打开输出目录")
         bdir.clicked.connect(lambda: os.startfile(self.cfg["output_dir"]))
         bsave = QPushButton("另存为…")
         bsave.clicked.connect(self._save_as)
-        ob.addWidget(bdir)
-        ob.addWidget(bsave)
-        ol.addLayout(ob)
+        ratio_lay.addWidget(bdir)
+        ratio_lay.addWidget(bsave)
+        ratio_lay.addStretch(1)
 
         self.right_tabs = QTabWidget()
         main_tab = QWidget()
         ml = QVBoxLayout(main_tab)
         ml.setContentsMargins(10, 10, 14, 10)
         ml.setSpacing(10)
-        ml.addWidget(g_ratio)
-        ml.addWidget(g_prompt)
-        ml.addWidget(g_out, 1)
+        ml.addWidget(g_prompt)                  # 提示词固定在最上方
+        below = QHBoxLayout()
+        below.setSpacing(10)
+        below.addWidget(ratio_col)              # 左：比例列表 + 结果操作按钮
+        below.addWidget(g_out, 1)               # 右：生成结果（仅预览 + 信息）
+        ml.addLayout(below, 1)                  # 下方左右布局占满剩余高度
         self.right_tabs.addTab(main_tab, "生成")
 
         adv_tab = QWidget()
@@ -703,6 +772,27 @@ class MainWindow(QMainWindow):
         self._update_res_label()
 
     # ---------------- 交互 ----------------
+    def _apply_unet_default(self, unet_value):
+        """套用推荐组合：text encoder + 默认步数 + 生成分辨率档位。
+
+        启动时与每次切换基模时各调用一次；用户之后手工改的 encoder / 步数 /
+        分辨率档位不会被覆盖，直到下次切换基模。
+        清单之外的自定义基模不联动，保留 config.json 里的原始值。
+        """
+        preset = UNET_DEFAULTS.get(unet_value)
+        if not preset:
+            return
+        clip_label, steps, tier_label = preset
+        i = self.clip_combo.findText(clip_label)
+        if i >= 0:
+            self.clip_combo.setCurrentIndex(i)
+        self.steps.setValue(steps)
+        # setCurrentText 触发 currentTextChanged → _set_tier()，同步刷新
+        # self.megapixels、档位说明与「输出画幅比例」下方的分辨率备注。
+        # 档位名必须在 TIERS 里，否则 _set_tier 的 TIERS[text] 会 KeyError。
+        if tier_label in TIERS and self.tier.currentText() != tier_label:
+            self.tier.setCurrentText(tier_label)
+
     def _set_ratio(self, key):
         self.ratio = key
         for k, b in self.ratio_buttons.items():
@@ -725,8 +815,9 @@ class MainWindow(QMainWindow):
             "尺寸严格符合比例且为 32 的倍数。")
 
     def _update_res_label(self):
-        w, h, mp = describe(self.ratio, self.megapixels)
-        self.res_label.setText(f"{self.ratio}  →  {w} × {h} px · {mp:.2f} MP")
+        # 备注只显示最终分辨率，形如 1024:1536；不再显示比例键、px 与 MP
+        w, h, _ = describe(self.ratio, self.megapixels)
+        self.res_label.setText(f"{w}:{h}")
 
     def _on_costume(self, obj):
         self.costume = obj
@@ -739,35 +830,61 @@ class MainWindow(QMainWindow):
     def _keep_bg(self):
         return bool(self.keep_bg_cb is not None and self.keep_bg_cb.isChecked())
 
+    def _upper_body(self):
+        """姿态来自「上半身单人」系列时改用半身构图句（与安卓版一致）。
+
+        优先看实际选中的姿态参考图；没有姿态参考图时看姿态页当前筛选的系列；
+        明确「不换姿势」或「全裸」时不按系列推断，保持原来的全身构图句。
+        """
+        if self.pose is not None:
+            return self.pose.system == UPPER_BODY_SYSTEM
+        browser = getattr(self, "pose_browser", None)
+        if browser is None:
+            return False
+        nude_btn = getattr(getattr(self, "costume_browser", None), "nude_btn", None)
+        if browser.keep_btn.isChecked() or (nude_btn is not None and nude_btn.isChecked()):
+            return False
+        return browser.sys.currentText() == UPPER_BODY_SYSTEM
+
+    def _on_pose_system(self, _system):
+        self._update_bg_hint()
+        self._update_prompt()
+
     def _on_keep_bg(self, _checked):
         self._update_bg_hint()
         self._update_prompt()
 
     def _update_bg_hint(self):
         if self._keep_bg():
-            self.bg_hint.setText("已启用：提示词末尾改为「%s」" % SCENE_TAIL_KEEP_BG)
+            self.bg_hint.setText(
+                "已启用：提示词末尾改为「%s」" % keep_bg_tail(self._upper_body()))
         else:
-            self.bg_hint.setText("未勾选：提示词末尾使用默认的构图、光线与简洁背景描述。")
+            tail = "半身构图" if self._upper_body() else "全身构图"
+            self.bg_hint.setText(
+                "未勾选：提示词末尾使用默认的构图、光线与简洁背景描述（%s）。" % tail)
 
     def _set_mode(self, text):
         if self._keep_bg():
             text += " · 保持原图背景"
+        if self._upper_body():
+            text += " · 半身构图"
         self.mode_label.setText(text)
 
     def _set_prompt_text(self, text):
         # 对自动生成的所有提示词（含全裸模式）统一替换，保证单一来源
         if self._keep_bg():
-            text = apply_keep_background(text)
+            text = apply_keep_background(text, self._upper_body())
         self.prompt_edit.setPlainText(text)
 
     def _update_prompt(self):
         has_c, has_p = bool(self.costume), bool(self.pose)
         self.nude = self.costume_browser.nude_btn.isChecked()
+        upper = self._upper_body()
         if self.nude:
             label = ("全裸 + 换姿势（2 张参考图）" if has_p
                      else "全裸 · 保持原姿势（1 张参考图）")
             self._set_mode("当前模式：" + label)
-            self._set_prompt_text(self._nude_prompt())
+            self._set_prompt_text(self._nude_prompt(upper))
             return
         if not has_c and not has_p:
             self._set_mode(
@@ -778,6 +895,7 @@ class MainWindow(QMainWindow):
                 "# 两项都选：同时换装与换姿势。选择后本提示词会自动生成，也可自行修改。",
                 "# 在服装页勾选「全裸 · 无服装」可生成全裸人像（可搭配姿态参考）。",
                 "# 勾选左下角「保持原图背景」后，构图/背景描述改为：保持<image1> 的背景、光线不变。",
+                "# 姿态选「上半身单人」系列时，构图句自动改为半身取景，不要求腿部入画。",
             ]
             self._set_prompt_text(chr(10).join(lines))
             return
@@ -793,18 +911,19 @@ class MainWindow(QMainWindow):
             tags,
             costume_keywords=self.costume.keywords if self.costume else "",
             pose_name=self.pose.name if self.pose else "",
-            pose_angle=self.pose.angle if self.pose else ""))
+            pose_angle=self.pose.angle if self.pose else "",
+            upper_body=upper))
 
-    def _nude_prompt(self):
+    def _nude_prompt(self, upper_body=False):
         has_p = bool(self.pose)
         if has_p:
             tags = ref_tags(False, True)
             prompt = (
                 "以 <image1> 中的成年女性为主角，严格保持她的面部特征、五官、发型发色、肤色与体型不变。\n"
                 "让她完全脱光所有衣物，呈现全裸状态。\n"
-                "让她的身体姿势、四肢位置、身体朝向与镜头角度完全参照 %s%s%s。\n"
-                + SCENE_TAIL + "\n"
-                + "completed_nude,huge_breasts,large_breasts,small_nipples"
+                "让她的身体姿势、四肢位置、脸部朝向、身体朝向与镜头角度完全参照 %s%s%s。\n"
+                + scene_tail(upper_body) + "\n"
+                + "completed_nude,slimthick body type with large prominent chest,with a slim waist and a full bust,huge_breasts,large_breasts,small_nipples,sparse_pubic_hair"
             ) % (tags["pose"],
                  "：%s" % self.pose.name if self.pose.name else "",
                  "，%s视角" % self.pose.angle if self.pose.angle else "")
@@ -813,8 +932,8 @@ class MainWindow(QMainWindow):
                 "以 <image1> 中的成年女性为主角，严格保持她的面部特征、五官、发型发色、肤色与体型不变。\n"
                 "让她完全脱光所有衣物，呈现全裸状态。\n"
                 "保持她原本的身体姿势不变。\n"
-                + SCENE_TAIL + "\n"
-                + "completed_nude,huge_breasts,large_breasts,small_nipples"
+                + scene_tail(upper_body) + "\n"
+                + "completed_nude,slimthick body type with large prominent chest,with a slim waist and a full bust,huge_breasts,large_breasts,small_nipples,sparse_pubic_hair"
             )
         return prompt
 
@@ -879,6 +998,10 @@ class MainWindow(QMainWindow):
             "steps": self.steps.value(),
             "cfg": self.cfgv.value(),
             "ref_resolution": self.refres.value(),
+            # 模型三件套由「生成参数」下拉决定，覆盖 config.py 的默认值
+            "unet": self.unet_combo.currentData(),
+            "clip": self.clip_combo.currentData(),
+            "vae": self.vae_combo.currentData(),
         }
         self.gen_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
@@ -1007,7 +1130,8 @@ def main():
         print("素材库警告:", catalog.errors, flush=True)
         QMessageBox.warning(None, "素材库加载提示", (chr(10) * 2).join(catalog.errors))
     win = MainWindow(cfg, catalog)
-    win.show()
+    # 启动即最大化；用户点「还原」后回到构造里 resize(1500, 950) 的尺寸。
+    win.showMaximized()
     sys.exit(app.exec())
 
 

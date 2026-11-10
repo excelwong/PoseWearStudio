@@ -156,12 +156,57 @@ set HF_ENDPOINT=https://hf-mirror.com
 | `text_encoders/qwen3.5_9b_qwen_image_2.1_pe_i2i.int8_convrot.safetensors` | 提示词增强（图像编辑） | 9.47 GB |
 | `loras/qwen_image_2.1_turbo_lora_avg_rank_178_bf16.safetensors` | 加速 LoRA | 0.87 GB |
 
+### 3.5 界面模型下拉与联动默认值（2026-11-10 新增）
+
+「分辨率与参数」tab 的「生成参数」里有三个模型下拉，选项定义在 `config.py` 的
+`UNET_MODELS` / `CLIP_MODELS` / `VAE_MODELS`，**显示名**与**传给 ComfyUI 的名字**分开：
+
+| 下拉 | 可选值（界面显示名） | 实际传给 ComfyUI |
+|---|---|---|
+| 基模 | `qwen-image-2.1-UC-int8_convrot.safetensors`、`qwen-image-2.1-UC-Q4_K_M.gguf`、`qwen-image-2.1-turbo-Q4_K_M.gguf` | 同名，位于 `models/diffusion_models/` |
+| Text Encoder | `qwen3-vl-8b-heretic-1.3.0-int8convrot.safetensors`、`qwen3vl_8b_int8_convrot.safetensors`、`qwen3vl_8b_w4a8.safetensors` | 带 `qwen_image_2.1\` 前缀，位于 `models/text_encoders/qwen_image_2.1/` |
+| VAE | `qwen_image_2.1_vae_bf16.safetensors`（唯一值） | 同名，位于 `models/vae/` |
+
+**基模联动会一次套用三项推荐值**（`config.py` 的 `UNET_DEFAULTS`：Text Encoder、
+步数、生成分辨率档位）。启动时按当前基模套用一次，之后每次切换基模再套用一次；
+手工改过的这三项在下次切换基模前都不会被覆盖。
+
+| 基模 | Text Encoder 默认 | 步数默认 | 生成分辨率默认 |
+|---|---|---|---|
+| `qwen-image-2.1-UC-int8_convrot.safetensors` | `qwen3-vl-8b-heretic-1.3.0-int8convrot.safetensors` | 25 | `标准：2.4MP` |
+| `qwen-image-2.1-UC-Q4_K_M.gguf` | `qwen3vl_8b_int8_convrot.safetensors` | 25 | `低显存：1MP` |
+| `qwen-image-2.1-turbo-Q4_K_M.gguf` | `qwen3vl_8b_w4a8.safetensors` | 8 | `低显存：0.6MP` |
+
+> 档位名必须与 `resolution.py` 的 `TIERS` 键逐字一致；统一格式为「名称：数值MP」
+> （全角冒号、数值与 MP 之间不留空格，如 `标准：2.4MP`）；
+> `config.json` 里的 `megapixels` 在启动时会被当前基模的推荐档位覆盖，
+> 想用其它档位就在启动后手工改，只要不切换基模就一直生效。
+
+三个 Text Encoder 现在都各自有对应基模；Turbo 只靠 8 步加速，CFG 仍是 1.0、euler / simple，
+两个 UC 版都是 25 步。`*.gguf` 基模（UC-Q4_K_M 与 Turbo）会自动改走 `UnetLoaderGGUF`，
+不需要在界面上另选工作流。切换档位会同步刷新「输出画幅比例」下方的分辨率备注与生成任务的
+`megapixels`。
+
+### 3.6 低显存分辨率档位
+
+「生成分辨率」下拉在原有 5 档之外新增两档，面向 **6 GB 显存**的机器：
+
+| 档位 | 2:3 下实际尺寸 | 说明 |
+|---|---|---|
+| `低显存：1MP` | 832 × 1248 | 约 1.04 MP |
+| `低显存：0.6MP` | 640 × 960 | 约 0.61 MP |
+
+定义在 `resolution.py` 的 `TIERS`；显存不足时 `tier_steps()` 按
+9.4 → 7.2 → 5.3 → 2.4 → 1.5 → 1.0 → 0.6 逐档自动降级重试。
+**低显存档位不用手工选**：切到 `qwen-image-2.1-UC-Q4_K_M.gguf` 自动带出 `低显存：1MP`，
+切到 Turbo GGUF 自动带出 `低显存：0.6MP`，同时换好各自的文本编码器与步数。
+
 ---
 
-## 4. 插件：**零个必需**
+## 4. 插件：GGUF 基模需要 ComfyUI-GGUF
 
-App 用到的 10 个节点**全部是 ComfyUI 核心内置节点**，不依赖 `custom_nodes/` 下任何插件。
-下表来自 `/object_info` 的 `python_module` 字段实测：
+选默认基模 `qwen-image-2.1-UC-int8_convrot.safetensors` 时，App 用到的节点
+**全部是 ComfyUI 核心内置节点**，不依赖任何插件：
 
 | 节点 | 归属模块 |
 |---|---|
@@ -169,47 +214,52 @@ App 用到的 10 个节点**全部是 ComfyUI 核心内置节点**，不依赖 `
 | `EmptyLatentImage` / `KSampler` / `VAEDecode` / `SaveImage` | `nodes`（核心） |
 | `TextEncodeQwenImage21` / `QwenImage21Cache` | `comfy_extras.nodes_qwen`（核心扩展） |
 
-所以：**升级 ComfyUI 到 ≥ v0.37.0，比装插件更重要。** 本机装了 近 30 个插件
-（Easy-Use、KJNodes、Impact-Pack、rgthree、1hewNodes、GGUF 等），但 App 一个都不调用。
+选任意 `*.gguf` 基模（`qwen-image-2.1-UC-Q4_K_M.gguf` 或 `qwen-image-2.1-turbo-Q4_K_M.gguf`）时，
+节点 `1` 换成插件节点 `UnetLoaderGGUF`（只收 `unet_name`，没有 `weight_dtype`），
+此时**必须安装** [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF)。本机已装；插件把
+`unet_gguf` 映射到 `diffusion_models` 与 `unet` 两个目录，所以 GGUF 放在
+`models/diffusion_models/` 即可（本机两个文件都已在该目录）。
 
-### 可选插件下载地址（非必需）
+**升级 ComfyUI 到 ≥ v0.37.0 仍比装插件更重要**，但 GGUF 这条路必须有 GGUF 插件。
+
+> **GGUF 文件本身还必须带 `general.architecture = qwen_image21` 元数据。**
+> 少数社区量化包（例如本机最初的 `qwen-image-2.1-turbo-Q4_K_M.gguf`）由旧转换脚本生成，
+> `kv_count = 0`、没有这个字段，插件会退回 sd.cpp 兼容模式并抛
+> `This model is not currently supported - (Unknown model architecture!)`。
+> 排查与修复见第 8 节的 `fix_gguf_metadata.py`。
+
+### 可选插件下载地址
 
 | 插件 | 用途 | 地址 |
 |---|---|---|
 | ComfyUI 本体 | 必需，但这是程序本体不是插件 | <https://github.com/comfyanonymous/ComfyUI> |
 | ComfyUI-Manager | 更新 ComfyUI、一键安装缺失节点 | <https://github.com/Comfy-Org/ComfyUI-Manager> |
-| ComfyUI-GGUF | **仅**运行 `workflows/` 里的 GGUF 版工作流时需要 | <https://github.com/city96/ComfyUI-GGUF>；Qwen-Image 2.1 需支持分支 <https://github.com/leejet/ComfyUI-GGUF> |
-| Qwen-Image-2.1 Prompt Enhancer | **仅**运行"提示词增强"工作流时需要 | <https://github.com/benjiyaya/ComfyUI-Qwen-Image-2.1-Prompt-Enhancer> |
-
-> 本机**未安装** Prompt Enhancer 插件，因此 `workflows/` 里两个"提示词增强"工作流
-> 缺少 `QwenImage21_EditPromptRewrite` / `QwenImage21_T2IPromptRewrite` 节点，导入后会显示红框。
-> 这与 App 运行无关。
+| ComfyUI-GGUF | **选 GGUF 基模时必需** | <https://github.com/city96/ComfyUI-GGUF>；Qwen-Image 2.1 需支持分支 <https://github.com/leejet/ComfyUI-GGUF> |
+| Qwen-Image-2.1 Prompt Enhancer | 仅运行"提示词增强"工作流时需要 | <https://github.com/benjiyaya/ComfyUI-Qwen-Image-2.1-Prompt-Enhancer> |
 
 ---
 
 ## 5. 工作流：`workflows/` 目录
 
 **运行 App 不需要导入任何工作流文件** —— `workflow.py` 每次按所选模式动态生成 API 格式 JSON。
-但 ComfyUI 支持两种 JSON 格式，容易混淆：
+ComfyUI 支持两种 JSON 格式，容易混淆：
 
 - **UI 格式**（`nodes` / `links` / `definitions`）：从 ComfyUI 界面「保存」出来的，拖进画布可用，
   **不能直接 POST 给 `/prompt`**。
 - **API 格式**（`{"节点ID": {"class_type": ..., "inputs": ...}}`）：App 用这种。
 
-本项目 `workflows/` 里放了 8 个文件：
+本项目 `workflows/` 里放了三份 API 格式样例，对应三个基模（可直接 POST `/prompt`，
+需先把 3 张参考图上传进 ComfyUI 的 `input/`；两份 GGUF 版还需装好 ComfyUI-GGUF 插件）：
 
-| 文件 | 格式 | 与 App 的关系 |
+| 文件 | 基模 / 工作流差异 | 说明 |
 |---|---|---|
-| `Qwen-Image-2.1_image_edit.json` | UI（含 1 个子图） | ★ **App 节点配置的参考来源**：标准 safetensors 链路，模型选择与 `config.py` 对应 |
-| `Qwen-Image_2_1_t2i.json` | UI（含 1 个子图） | 同套模型的文生图参考 |
-| `api_workflow_example.json` | **API** | ★ **App 实际提交内容的结构样例**：3 图模式、1344×1792、seed 固定，可直接 POST `/prompt`（需先把 3 张参考图上传进 ComfyUI 的 `input/`） |
-| `Qwen-Image-2.1_image_edit_Uncensor_合并版.json` | UI（4 子图） | 可选参考，走 GGUF 链路，需 ComfyUI-GGUF + GGUF 权重 + LoRA |
-| `Qwen-Image-2.1_image_edit_Uncensor_合并版_提示词增强.json` | UI（2 子图） | 可选参考，另需 Prompt Enhancer 插件与 PE 模型 |
-| `Qwen-Image-2.1_image_edit_Uncensor_展开版.json` | UI | 可选参考，GGUF 链路展开版 |
-| `Qwen-Image-2.1_image_nipple_edit_Uncensor_展开版.json` | UI | 可选参考，GGUF 链路展开版 |
-| `Qwen-Image_2_1_t2i_提示词增强.json` | UI（1 子图） | 可选参考，另需 Prompt Enhancer 插件与 PE 模型 |
+| `api_workflow_example.json` | `qwen-image-2.1-UC-int8_convrot.safetensors` | 节点 `1` = `UNETLoader`（带 `weight_dtype`），text encoder = heretic，steps 25，1344×1792，seed 固定 |
+| `api_workflow_uc_q4_gguf_example.json` | `qwen-image-2.1-UC-Q4_K_M.gguf` | 节点 `1` = `UnetLoaderGGUF`（只有 `unet_name`），text encoder = `qwen3vl_8b_int8_convrot.safetensors`，steps 25 |
+| `api_workflow_turbo_gguf_example.json` | `qwen-image-2.1-turbo-Q4_K_M.gguf` | 节点 `1` = `UnetLoaderGGUF`，text encoder = `qwen3vl_8b_w4a8.safetensors`，steps 8 |
 
-后 5 个是本机原有的社区工作流，仅作备份/参考，**App 运行时不读取**。
+**三份样例的差异只可能出现在节点 `1`（loader）、text encoder 文件名与步数这三处**
+（UC int8 与 UC-Q4 同为 25 步，节点 `30` 也相同），其余节点完全一致；
+App 里由 `workflow.py build()` 按 `.gguf` 后缀自动选择 loader，切换基模时套用推荐组合。
 
 ### 官方工作流模板下载地址
 
@@ -240,6 +290,7 @@ PoseWearStudio/
 ├─ generator.py              后台生成线程（上传/排队/轮询/落盘/OOM 降档）
 ├─ resolution.py             比例 → 精确宽高（32 倍数）
 ├─ test_pipeline.py          端到端自检脚本
+├─ fix_gguf_metadata.py      修复缺 general.architecture 的 GGUF 文件（见第 8 节）
 ├─ workflows/                ★ 工作流参考与备份（见第 5 节）
 ├─ 服装库/ 姿态库/           项目内素材库（含 _metadata.csv）
 ├─ cache/thumbs/             缩略图缓存（可删，会自动重建）
@@ -261,14 +312,22 @@ PoseWearStudio/
    `run.bat` 会检测 8188 端口，没开就自动拉起 ComfyUI；文件本身必须保持 **CRLF 行尾 + 纯 ASCII**。
 3. 界面顶部显示「ComfyUI 已连接 · xx GB 显存可用」即就绪。
 
-**右侧分栏**：默认「生成」tab 放输出画幅比例、提示词、生成结果（含「打开输出目录」「另存为」）；
-不常调整的「生成分辨率」「生成参数」在「分辨率与参数」tab。
-「开始生成」「中断当前任务」、进度与状态固定在右侧底栏，两个 tab 下都可见，
-默认窗口尺寸下无需滚动即可看全全部常用控件。
+**右侧分栏**：默认「生成」tab 的最上方是「提示词」控件组（在原来 180px 基础上，
+按当前字体行高再增加 2 行可见高度，带常显的垂直滚动条，内容更长时直接滚动查看）；
+下方左侧是「输出画幅比例」：9 个比例按钮竖向一列（默认选中 `2:3`），
+组底部备注只显示最终分辨率，形如 `1280:1920`，不再显示比例键、px 与 MP；
+「打开输出目录」「另存为」两个按钮也放在这一列、比例组的下方。
+右侧「生成结果」只保留预览图与结果信息，预览区因此可以用满剩余高度。
+不常调整的「生成分辨率」（含「低显存：1MP」「低显存：0.6MP」两档）与「生成参数」
+（步数 / CFG / 种子 / 参考图边长 + 基模、Text Encoder、VAE 三个模型下拉）在「分辨率与参数」tab。
+切换基模会自动套用推荐 text encoder、步数与分辨率档位三项，详见 3.5 节。
+「开始生成」「中断当前任务」、进度与状态固定在右侧底栏，两个 tab 下都可见。
+**应用启动即窗口最大化**（`main()` 用 `showMaximized()`；点「还原」回到 1500×950），
+默认尺寸下无需滚动即可看全全部常用控件。
 
 **左侧三个 tab 之后的「保持原图背景」选项**：勾选后，自动生成提示词末尾的整句
 
-> `根据输出画幅合理构图，人物完整入画、不裁切头脚，光线自然柔和，背景简洁干净，真实皮肤质感，高细节、高清晰度，专业人像摄影，无文字无水印。`
+> `根据输出画幅合理构图，人物完整入画、手清晰可见、不裁切头脚，光线自然柔和，背景简洁干净，真实皮肤质感，高细节、高清晰度，专业人像摄影，无文字无水印。`
 
 会被替换为
 
@@ -276,8 +335,25 @@ PoseWearStudio/
 
 对所有模式（只换装 / 只换姿势 / 换装+换姿势 / 全裸）都生效，右侧模式标签会追加「· 保持原图背景」；
 取消勾选即恢复默认文案。若手工改过提示词，重新点选素材或切换任一选项即可按当前状态重建。
-这两段文案定义在 `workflow.py` 的 `SCENE_TAIL` / `SCENE_TAIL_KEEP_BG` 常量里，替换逻辑在
-`apply_keep_background()`，是唯一来源。
+这些文案定义在 `workflow.py` 的 `SCENE_TAIL` / `SCENE_TAIL_UPPER` / `SCENE_TAIL_KEEP_BG`
+常量与 `scene_tail()` / `keep_bg_tail()` 里，替换逻辑在 `apply_keep_background()`，是唯一来源。
+全身构图里的「手清晰可见」用于避免袖口空荡、缺手；勾选「保持原图背景」后整句被替换，
+该约束不生效，属于预期行为。
+
+**姿态库「上半身单人」系列的半身构图**（2026-11-10 与安卓版同步）：该系列是半身 / 胸像参考图，
+不能要求「人物完整入画、手清晰可见、不裁切头脚」。只要「③ 选择姿态」的系列下拉选到「上半身单人」，
+或选中的姿态图属于该系列（CSV「系统」列），提示词里的构图句就会自动换成
+
+> `半身取景，头部与上半身完整入画、不裁切头部与肩膀，腿部不必入画`
+
+整句其余部分（光线、皮肤质感、画质、无水印）保持不变；系列下拉一变就立即重建提示词，
+右侧模式标签追加「· 半身构图」。判定优先级与安卓版一致：**选中姿态图 > 系列下拉**；
+勾选「不换姿势 · 保持原姿势」或「全裸 · 无服装」且没有姿态参考图时不按系列推断，仍用全身构图句。
+勾选「保持原图背景」时，半身模式替换成 `保持<image1> 的背景、光线不变。` 之后会补回半身构图句，
+不会把构图信息一起丢掉（替换仍幂等）；全裸模式同样生效。
+常量 `UPPER_BODY_SYSTEM` / `FRAME_FULL` / `FRAME_UPPER` 定义在 `workflow.py`，
+与安卓版 `Prompt.kt` 逐字对应。`test_pipeline.py` 不经过界面，默认仍是全身构图句，
+需要半身时给 `make_prompt()` 传 `upper_body=True` 即可。
 
 命令行自检（不依赖界面，验证「上传 → 出图 → 落盘」全链路）：
 
@@ -313,6 +389,38 @@ C:\AI\ComfyUI-aki-v3\python\python.exe -c "import json,urllib.request; d=json.lo
 | 素材列表为空 | `config.json` 的 `library_root` 指错；默认 `"."` 即项目根目录 |
 | 界面中文变方框 | 系统缺中文字体，App 已内置 `Microsoft YaHei` / `Noto Sans SC` / `DengXian` 回退 |
 | 操作后程序突然退出 | 已修复；异常现在写入 `cache/error.log` 并弹窗提示，不再 abort |
+| 选 Turbo GGUF 生成失败：`execution_error` / `UnetLoaderGGUF` / `This model is not currently supported - (Unknown model architecture!)` | 该 GGUF 缺 `general.architecture`，见下方 8.1 |
+
+### 8.1 GGUF 报 `Unknown model architecture`（2026-11-10 实测修复）
+
+**症状**：App 选 `qwen-image-2.1-turbo-Q4_K_M.gguf` 后返回带 `execution_error`、
+`node_type = UnetLoaderGGUF` 的错误串。
+
+**根因**（与 App 代码无关，问题在模型文件）：该文件 `kv_count = 0`，没有
+`general.architecture`，且 297 个张量名还带 `model.diffusion_model.` 前缀 —— 是旧
+转换脚本的产物。ComfyUI-GGUF 的 `loader.py` 见 `arch_str is None` 就进入 sd.cpp
+兼容模式，转去调 `tools/convert.py` 的 `detect_arch()`；那份旧 `arch_list` 只列了
+flux / sd3 / wan / sdxl 等，**没有 `qwen_image21`**，于是断言
+`Unknown model architecture!`，`loader.py:105` 包装成上面那句报错。
+同目录的 `qwen-image-2.1-UC-Q4_K_M.gguf` / `UC-Q8_0.gguf` 都带
+`general.architecture = qwen_image21`，所以能正常加载。
+
+**修复**：项目根目录 `fix_gguf_metadata.py` 只改写 GGUF 头部 —— 插入
+`general.architecture` / `quantization_version` / `file_type` 三个 KV 并重新对齐
+padding，张量 shape / type / offset 与全部量化字节原样保留，**不重新量化、不改文件名**：
+
+```bash
+python fix_gguf_metadata.py "C:/AI/ComfyUI-aki-v3/ComfyUI/models/diffusion_models/qwen-image-2.1-turbo-Q4_K_M.gguf" --plugin-loader "C:/AI/ComfyUI-aki-v3/ComfyUI/custom_nodes/ComfyUI-GGUF/loader.py" --apply
+```
+
+不加 `--apply` 只生成 `.fixed` 副本并全量校验；`--apply` 会把原文件备份成 `.gguf.bak`
+再替换。因为文件名不变，**ComfyUI 无需重启**，直接重新点「开始生成」。
+
+本机 2026-11-10 已修复：`data_offset 29728 → 29856`，4,050,886,656 字节数据区
+sha256 与原文件完全一致；离屏调用 `gguf_sd_loader()` 返回
+`arch_str = qwen_image21`、297 张量，state_dict 的 key 集合与 UC-Q4 逐项一致。
+备份留在 `models/diffusion_models/qwen-image-2.1-turbo-Q4_K_M.gguf.bak`（约 3.8 GB），
+确认新版可用后可自行删除。
 
 ---
 

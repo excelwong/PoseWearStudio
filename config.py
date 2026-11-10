@@ -48,6 +48,45 @@ DEFAULTS = {
     "generation_timeout": 1200,
 }
 
+# ---------- 可选模型清单 ----------
+# 每项 = (界面显示名, 传给 ComfyUI 的 unet_name / clip_name / vae_name)。
+# 三个 text encoder 实际都在 models/text_encoders/qwen_image_2.1/ 子目录，
+# 所以 clip_name 必须带子目录前缀，界面只显示纯文件名。
+UNET_MODELS = [
+    ("qwen-image-2.1-UC-int8_convrot.safetensors",
+     "qwen-image-2.1-UC-int8_convrot.safetensors"),
+    ("qwen-image-2.1-UC-Q4_K_M.gguf",
+     "qwen-image-2.1-UC-Q4_K_M.gguf"),
+    ("qwen-image-2.1-turbo-Q4_K_M.gguf",
+     "qwen-image-2.1-turbo-Q4_K_M.gguf"),
+]
+CLIP_MODELS = [
+    ("qwen3-vl-8b-heretic-1.3.0-int8convrot.safetensors",
+     r"qwen_image_2.1\qwen3-vl-8b-heretic-1.3.0-int8convrot.safetensors"),
+    ("qwen3vl_8b_int8_convrot.safetensors",
+     r"qwen_image_2.1\qwen3vl_8b_int8_convrot.safetensors"),
+    ("qwen3vl_8b_w4a8.safetensors",
+     r"qwen_image_2.1\qwen3vl_8b_w4a8.safetensors"),
+]
+VAE_MODELS = [
+    ("qwen_image_2.1_vae_bf16.safetensors",
+     "qwen_image_2.1_vae_bf16.safetensors"),
+]
+# 切换基模时的推荐组合：
+#   (text_encoder 显示名, 默认步数, 生成分辨率档位名)。
+# 档位名必须与 resolution.py 的 TIERS 键逐字一致，统一「名称：数值MP」格式
+# （全角冒号，数值后无空格）。
+# 启动时与每次切换基模时各套用一次；之后手工改的值不会被覆盖，直到下次切换基模。
+# 两个 Q4_K_M.gguf 都走 ComfyUI-GGUF 的 UnetLoaderGGUF（workflow.build 按后缀自动判定）。
+UNET_DEFAULTS = {
+    "qwen-image-2.1-UC-int8_convrot.safetensors":
+        ("qwen3-vl-8b-heretic-1.3.0-int8convrot.safetensors", 25, "标准：2.4MP"),
+    "qwen-image-2.1-UC-Q4_K_M.gguf":
+        ("qwen3vl_8b_int8_convrot.safetensors", 25, "低显存：1MP"),
+    "qwen-image-2.1-turbo-Q4_K_M.gguf":
+        ("qwen3vl_8b_w4a8.safetensors", 8, "低显存：0.6MP"),
+}
+
 
 def _resolve(value):
     """相对路径按项目根目录 BASE 解析为绝对路径；绝对路径原样规范化。"""

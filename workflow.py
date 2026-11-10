@@ -8,25 +8,51 @@
   只选服装            ：2 张参考图，保持原姿势、只换装
   只选姿态            ：2 张参考图，保持原服装、只换姿势
   两者都不选          ：禁止（ref_tags 会抛 ValueError）
+
+提示词里的构图句有两个版本：全身系列用 FRAME_FULL，姿态库「上半身单人」系列
+用 FRAME_UPPER（安卓版 Prompt.kt 与之逐字对应）。所有模式的文案只在
+本文件里定义一份，避免界面 / 命令行 / 全裸模式出现写法不一致的副本。
 """
 import random
 import re
 
+# 姿态库 CSV「系统」列的这个取值是半身 / 胸像素材，不能要求「人物完整入画、手清晰可见、不裁切头脚」。
+UPPER_BODY_SYSTEM = "上半身单人"
+
+# 全身构图额外强调手部完整，避免服装袖口空荡、缺手（2026-11-10）。
+FRAME_FULL = "人物完整入画、手清晰可见、不裁切头脚"
+FRAME_UPPER = "半身取景，头部与上半身完整入画、不裁切头部与肩膀，腿部不必入画"
+
 # 提示词末尾的通用「构图 / 光线 / 背景」整句。
-# 勾选「保持原图背景」时，整句替换为 SCENE_TAIL_KEEP_BG。
-# 界面与全裸提示词也复用这两个常量，避免出现多份写法不一致的副本。
+# 勾选「保持原图背景」时，整句替换为 SCENE_TAIL_KEEP_BG（半身模式会补回半身约束）。
 SCENE_TAIL = (
-    "根据输出画幅合理构图，人物完整入画、不裁切头脚，光线自然柔和，背景简洁干净，"
-    "真实皮肤质感，高细节、高清晰度，专业人像摄影，无文字无水印。"
+    "根据输出画幅合理构图，" + FRAME_FULL + "，光线自然柔和，背景简洁干净，"
+    + "真实皮肤质感，高细节、高清晰度，专业人像摄影，无文字无水印。"
 )
 SCENE_TAIL_KEEP_BG = "保持<image1> 的背景、光线不变。"
 
+# 上半身系列：只替换构图那一小句，光线 / 质感 / 画质描述保持不变。
+SCENE_TAIL_UPPER = SCENE_TAIL.replace(FRAME_FULL, FRAME_UPPER)
 
-def apply_keep_background(text):
-    """把任意提示词中的默认构图/背景整句替换为「保持原图背景」文案（幂等）。"""
+
+def scene_tail(upper_body=False):
+    """按是否半身构图返回末尾整句。默认参数保证旧调用行为不变。"""
+    return SCENE_TAIL_UPPER if upper_body else SCENE_TAIL
+
+
+def keep_bg_tail(upper_body=False):
+    """「保持原图背景」的替换文案；半身模式额外保留半身构图约束。"""
+    return SCENE_TAIL_KEEP_BG + (FRAME_UPPER if upper_body else "")
+
+
+def apply_keep_background(text, upper_body=False):
+    """把任意提示词中的默认构图/背景整句替换为「保持原图背景」文案（幂等）。
+
+    upper_body=True 时按半身版本的整句匹配，避免用户手工改成半身句后替换失效。
+    """
     if not text:
         return text
-    return text.replace(SCENE_TAIL, SCENE_TAIL_KEEP_BG)
+    return text.replace(scene_tail(upper_body), keep_bg_tail(upper_body))
 
 
 def ref_tags(has_costume, has_pose):
@@ -44,11 +70,12 @@ def ref_tags(has_costume, has_pose):
 
 
 def make_prompt(tags, costume_keywords="", pose_name="", pose_angle="",
-                keep_background=False):
+                keep_background=False, upper_body=False):
     """按当前模式生成提示词。tags 来自 ref_tags()，缺少的项表示「保持原样」。
 
     keep_background=True 时，末尾的通用构图/背景整句会被替换为
-    「保持<image1> 的背景、光线不变。」
+    「保持<image1> 的背景、光线不变。」（upper_body=True 时后面补半身构图句）。
+    upper_body=True 表示姿态来自「上半身单人」系列，构图句改用半身版本。
     """
     if "costume" not in tags and "pose" not in tags:
         raise ValueError("服装和姿态至少要选择一项")
@@ -74,14 +101,17 @@ def make_prompt(tags, costume_keywords="", pose_name="", pose_angle="",
         desc = "：%s" % pose_name if pose_name else ""
         angle = "，%s视角" % pose_angle if pose_angle else ""
         lines.append(
-            "让她的身体姿势、四肢位置、身体朝向与镜头角度完全参照 %s%s%s。"
+            "让她的身体姿势、四肢位置、脸部朝向、身体朝向与镜头角度完全参照 %s%s%s。"
             % (pose, desc, angle))
     else:
         lines.append(
             "严格保持 %s 中她原本的身体姿势、四肢位置、身体朝向与镜头角度不变，"
             "不要改变动作、站姿或坐姿。" % person)
 
-    lines.append(SCENE_TAIL_KEEP_BG if keep_background else SCENE_TAIL)
+    if keep_background:
+        lines.append(keep_bg_tail(upper_body))
+    else:
+        lines.append(scene_tail(upper_body))
     return "\n".join(lines)
 
 
@@ -137,9 +167,17 @@ def build(*, refs, width, height, prompt, negative=None,
     if not 1 <= len(refs) <= 3:
         raise ValueError("参考图数量必须是 1~3 张，当前 %d 张" % len(refs))
     seed = random.randint(1, 2 ** 31 - 1) if seed is None else int(seed)
+    # GGUF 量化基模不能用核心 UNETLoader：ComfyUI-GGUF 插件提供 UnetLoaderGGUF，
+    # 其必填输入只有 unet_name（没有 weight_dtype），候选文件来自
+    # diffusion_models / unet 目录下的 *.gguf。其余节点两种模型完全一致。
+    if str(unet).lower().endswith(".gguf"):
+        unet_loader = {"class_type": "UnetLoaderGGUF",
+                       "inputs": {"unet_name": unet}}
+    else:
+        unet_loader = {"class_type": "UNETLoader", "inputs": {
+            "unet_name": unet, "weight_dtype": weight_dtype}}
     p = {
-        "1": {"class_type": "UNETLoader", "inputs": {
-            "unet_name": unet, "weight_dtype": weight_dtype}},
+        "1": unet_loader,
         "2": {"class_type": "QwenImage21Cache", "inputs": {
             "model": ["1", 0], "device": cache_device, "dtype": cache_dtype}},
         "3": {"class_type": "CLIPLoader", "inputs": {

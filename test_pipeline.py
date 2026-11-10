@@ -38,7 +38,7 @@ def make_placeholder(path):
 
 
 def main():
-    ratio = sys.argv[1] if len(sys.argv) > 1 else "3:4"
+    ratio = sys.argv[1] if len(sys.argv) > 1 else "2:3"   # 与界面默认选中一致
     mp = float(sys.argv[2]) if len(sys.argv) > 2 else CFG["megapixels"]
     mode = sys.argv[3] if len(sys.argv) > 3 else "both"
     if mode not in ("both", "costume", "pose"):
