@@ -9,6 +9,10 @@
   只选姿态            ：2 张参考图，保持原服装、只换姿势
   两者都不选          ：禁止（ref_tags 会抛 ValueError）
 
+姿态参考句统一为「让她的身体姿势、四肢位置、脸部朝向、身体朝向与镜头角度完全参照 <imageN>：」
+加 _metadata.csv「姿态描述_中文」列的整段内容；该列已包含画幅、躯体姿势、四肢手指、
+脸部朝向与镜头方向，因此不再按「角度」列额外拼「XX视角 / 脸部朝下」之类的短句。
+
 提示词里的构图句有两个版本：全身系列用 FRAME_FULL，姿态库「上半身单人」系列
 用 FRAME_UPPER（安卓版 Prompt.kt 与之逐字对应）。所有模式的文案只在
 本文件里定义一份，避免界面 / 命令行 / 全裸模式出现写法不一致的副本。
@@ -16,11 +20,10 @@
 import random
 import re
 
-# 姿态库 CSV「系统」列的这个取值是半身 / 胸像素材，不能要求「人物完整入画、手清晰可见、不裁切头脚」。
+# 姿态库 CSV「系统」列的这个取值是半身 / 胸像素材，不能要求「人物完整入画、不裁切头脚」。
 UPPER_BODY_SYSTEM = "上半身单人"
 
-# 全身构图额外强调手部完整，避免服装袖口空荡、缺手（2026-11-10）。
-FRAME_FULL = "人物完整入画、手清晰可见、不裁切头脚"
+FRAME_FULL = "人物完整入画、不裁切头脚"
 FRAME_UPPER = "半身取景，头部与上半身完整入画、不裁切头部与肩膀，腿部不必入画"
 
 # 提示词末尾的通用「构图 / 光线 / 背景」整句。
@@ -69,9 +72,34 @@ def ref_tags(has_costume, has_pose):
     return tags
 
 
+# 姿态参考句的统一前缀（不含冒号后的内容）。安卓版 Prompt.kt 与之逐字一致。
+POSE_REF_PREFIX = "让她的身体姿势、四肢位置、脸部朝向、身体朝向与镜头角度完全参照 %s"
+
+
+def pose_reference_line(pose_tag, description="", pose_name="", pose_angle=""):
+    """生成姿态参考句：统一前缀 + 冒号 + _metadata.csv「姿态描述_中文」整段。
+
+    description 自带句末句号，不再补句号；CSV 缺该列（旧素材库）时降级为
+    「姿态名，XX视角。」，但不追加任何按角度推断的脸部朝向短句。
+    所有模式（换装 / 只换姿势 / 全裸）都调用本函数，保证文案单一来源。
+    """
+    desc = (description or "").strip()
+    if not desc:
+        name = (pose_name or "").strip()
+        angle = (pose_angle or "").strip()
+        bits = [x for x in (name, "%s视角" % angle if angle else "") if x]
+        desc = "，".join(bits) + "。" if bits else ""
+    elif not desc.endswith(("。", "！", "？", ".", "!", "?")):
+        desc += "。"
+    return POSE_REF_PREFIX % pose_tag + ("：" + desc if desc else "。")
+
+
 def make_prompt(tags, costume_keywords="", pose_name="", pose_angle="",
-                keep_background=False, upper_body=False):
+                keep_background=False, upper_body=False, pose_description=""):
     """按当前模式生成提示词。tags 来自 ref_tags()，缺少的项表示「保持原样」。
+
+    pose_description 是 _metadata.csv「姿态描述_中文」列内容，按当前选中的那张
+    姿态图取值（同一姿态不同角度描述不同）；为空时降级为 pose_name + pose_angle。
 
     keep_background=True 时，末尾的通用构图/背景整句会被替换为
     「保持<image1> 的背景、光线不变。」（upper_body=True 时后面补半身构图句）。
@@ -84,7 +112,7 @@ def make_prompt(tags, costume_keywords="", pose_name="", pose_angle="",
     pose = tags.get("pose")
 
     lines = [
-        "以 %s 中的成年女性为主角，严格保持她的面部特征、五官、发型发色、肤色与体型不变，"
+        "以 %s 中的女性为主角，严格保持她的面部特征、五官、发型发色、肤色与体型不变，"
         "生成一张自然写实的人像摄影照片。" % person,
     ]
     if costume:
@@ -98,11 +126,8 @@ def make_prompt(tags, costume_keywords="", pose_name="", pose_angle="",
             "完全一致，不要更换、添加或改动任何衣物。" % person)
 
     if pose:
-        desc = "：%s" % pose_name if pose_name else ""
-        angle = "，%s视角" % pose_angle if pose_angle else ""
-        lines.append(
-            "让她的身体姿势、四肢位置、脸部朝向、身体朝向与镜头角度完全参照 %s%s%s。"
-            % (pose, desc, angle))
+        lines.append(pose_reference_line(
+            pose, pose_description, pose_name, pose_angle))
     else:
         lines.append(
             "严格保持 %s 中她原本的身体姿势、四肢位置、身体朝向与镜头角度不变，"

@@ -79,7 +79,8 @@ def main():
     prompt = make_prompt(tags,
                          costume_keywords=costume.keywords if costume else "",
                          pose_name=pose.name if pose else "",
-                         pose_angle=pose.angle if pose else "")
+                         pose_angle=pose.angle if pose else "",
+                         pose_description=pose.description if pose else "")
     flow, out_id = build(
         refs=names, width=w, height=h, prompt=prompt,
         negative=make_negative(tags),

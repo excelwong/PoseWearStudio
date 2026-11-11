@@ -4,6 +4,9 @@
 root 由 config.py 解析为绝对路径；CSV 中的「原图」列只存文件名，
 完整路径按 root/服装库/分类/文件名 与 root/姿态库/系统/分类/文件名 拼接，
 因此素材库随项目整体搬迁后无需改动任何数据。
+
+姿态条目额外携带 CSV 的「姿态描述_中文」列：提示词里姿态参考句冒号后的内容
+全部由该列提供（同一姿态的不同角度各行描述不同，必须按当前选中的那条记录取）。
 """
 import csv
 import os
@@ -33,6 +36,8 @@ class Pose:
     angle: str
     prompt: str
     path: str
+    # _metadata.csv 的「姿态描述_中文」；旧素材库缺列时为空串，提示词会降级
+    description: str = ""
 
 
 def _read_csv(path):
@@ -53,6 +58,7 @@ class Catalog:
         self.poses = []
         self.errors = []
         self.missing_files = 0
+        self.pose_desc_missing = 0
         self._load()
 
     def _check_dir(self, path, label):
@@ -98,15 +104,23 @@ class Catalog:
                     if not os.path.isfile(path):
                         self.missing_files += 1
                         continue
+                    desc = (row.get("姿态描述_中文") or "").strip()
+                    if not desc:
+                        self.pose_desc_missing += 1
                     self.poses.append(Pose(
                         row.get("id", "").strip(), system, cat,
                         row.get("姿态编号", "").strip(),
                         row.get("姿态名", "").strip(),
                         row.get("角度", "").strip(),
-                        row.get("提示词", "").strip(), path))
+                        row.get("提示词", "").strip(), path, desc))
             else:
                 self.errors.append("缺少姿态库 _metadata.csv: " + ppath)
 
+        if self.pose_desc_missing:
+            self.errors.append(
+                "姿态库 _metadata.csv 有 %d 行缺少「姿态描述_中文」列；这些姿态的提示词"
+                "将降级为「姿态名 + 角度视角」。请把项目内更新后的 _metadata.csv "
+                "同步到素材库目录。" % self.pose_desc_missing)
         if self.missing_files:
             self.errors.append(
                 "有 {} 条素材记录对应的图片文件不存在（可能是复制不完整）".format(

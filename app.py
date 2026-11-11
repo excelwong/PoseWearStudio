@@ -30,7 +30,8 @@ from catalog import Catalog                              # noqa: E402
 from resolution import RATIOS, TIERS, describe            # noqa: E402
 from workflow import (make_prompt, make_negative, ref_tags,  # noqa: E402
                       validate_prompt, apply_keep_background, scene_tail,
-                      keep_bg_tail, UPPER_BODY_SYSTEM, SCENE_TAIL_KEEP_BG)
+                      keep_bg_tail, pose_reference_line, UPPER_BODY_SYSTEM,
+                      SCENE_TAIL_KEEP_BG)
 from thumbs import ThumbCache, ThumbWorker               # noqa: E402
 from generator import GenerateWorker                     # noqa: E402
 from comfy_client import ComfyClient                     # noqa: E402
@@ -912,24 +913,25 @@ class MainWindow(QMainWindow):
             costume_keywords=self.costume.keywords if self.costume else "",
             pose_name=self.pose.name if self.pose else "",
             pose_angle=self.pose.angle if self.pose else "",
+            pose_description=self.pose.description if self.pose else "",
             upper_body=upper))
 
     def _nude_prompt(self, upper_body=False):
         has_p = bool(self.pose)
         if has_p:
             tags = ref_tags(False, True)
+            # 姿态参考句与 make_prompt 共用同一函数：统一前缀 + CSV「姿态描述_中文」
             prompt = (
-                "以 <image1> 中的成年女性为主角，严格保持她的面部特征、五官、发型发色、肤色与体型不变。\n"
+                "以 <image1> 中的女性为主角，严格保持她的面部特征、五官、发型发色、肤色与体型不变。\n"
                 "让她完全脱光所有衣物，呈现全裸状态。\n"
-                "让她的身体姿势、四肢位置、脸部朝向、身体朝向与镜头角度完全参照 %s%s%s。\n"
+                + pose_reference_line(tags["pose"], self.pose.description,
+                                      self.pose.name, self.pose.angle) + "\n"
                 + scene_tail(upper_body) + "\n"
                 + "completed_nude,slimthick body type with large prominent chest,with a slim waist and a full bust,huge_breasts,large_breasts,small_nipples,sparse_pubic_hair"
-            ) % (tags["pose"],
-                 "：%s" % self.pose.name if self.pose.name else "",
-                 "，%s视角" % self.pose.angle if self.pose.angle else "")
+            )
         else:
             prompt = (
-                "以 <image1> 中的成年女性为主角，严格保持她的面部特征、五官、发型发色、肤色与体型不变。\n"
+                "以 <image1> 中的女性为主角，严格保持她的面部特征、五官、发型发色、肤色与体型不变。\n"
                 "让她完全脱光所有衣物，呈现全裸状态。\n"
                 "保持她原本的身体姿势不变。\n"
                 + scene_tail(upper_body) + "\n"
