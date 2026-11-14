@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """端到端管线自检：占位人物图 + 真实服装/姿态参考图 → ComfyUI → 保存出图。
 
-用法: python test_pipeline.py [比例] [百万像素] [模式]
+用法: python test_pipeline.py [比例] [百万像素] [模式] [引擎]
   模式: both（默认，换装+换姿势） / costume（只换装） / pose（只换姿势）
+  引擎: qwen（默认，Qwen-Image 2.1） / h3（MiniMax-H3-Image，建议 16~20 MP）
 """
 import os
 import sys
@@ -15,6 +16,8 @@ from config import CFG                      # noqa: E402
 from catalog import Catalog                 # noqa: E402
 from comfy_client import ComfyClient, ComfyError, OOMError  # noqa: E402
 from workflow import build, make_prompt, make_negative, ref_tags  # noqa: E402
+from h3_workflow import build_h3, make_h3_prompt, h3_ref_tags  # noqa: E402
+from config import H3_UNET, H3_CLIP, H3_VAE, H3_STEPS, H3_CFG  # noqa: E402
 from resolution import describe            # noqa: E402
 
 
@@ -43,6 +46,9 @@ def main():
     mode = sys.argv[3] if len(sys.argv) > 3 else "both"
     if mode not in ("both", "costume", "pose"):
         raise SystemExit("模式必须是 both / costume / pose")
+    engine = sys.argv[4] if len(sys.argv) > 4 else "qwen"
+    if engine not in ("qwen", "h3"):
+        raise SystemExit("引擎必须是 qwen / h3")
     has_c = mode in ("both", "costume")
     has_p = mode in ("both", "pose")
 
@@ -52,7 +58,7 @@ def main():
     cat = Catalog(CFG["library_root"], CFG["costume_categories"],
                   CFG["pose_systems"], CFG["pose_categories_excluded"])
     print("[2/5] 素材:", len(cat.costumes), "件服装 /", len(cat.poses), "张姿态",
-          "| 模式:", mode)
+          "| 模式:", mode, "| 引擎:", engine)
     costume = (next((c for c in cat.costumes if c.category == "夏装"), cat.costumes[0])
                if has_c else None)
     pose = (next((p for p in cat.poses if p.angle == "正面"), cat.poses[0])
@@ -75,20 +81,29 @@ def main():
 
     w, h, real_mp = describe(ratio, mp)
     print(f"[4/5] 目标 {ratio} -> {w}x{h} ({real_mp:.2f} MP)")
-    tags = ref_tags(has_c, has_p)
-    prompt = make_prompt(tags,
-                         costume_keywords=costume.keywords if costume else "",
-                         pose_name=pose.name if pose else "",
-                         pose_angle=pose.angle if pose else "",
-                         pose_description=pose.description if pose else "")
-    flow, out_id = build(
-        refs=names, width=w, height=h, prompt=prompt,
-        negative=make_negative(tags),
-        steps=CFG["steps"], cfg=CFG["cfg"], sampler=CFG["sampler"],
-        scheduler=CFG["scheduler"], unet=CFG["unet"], clip=CFG["clip"],
-        vae=CFG["vae"], clip_type=CFG["clip_type"],
-        weight_dtype=CFG["weight_dtype"], ref_resolution=CFG["ref_resolution"],
-        cache_device=CFG["cache_device"], cache_dtype=CFG["cache_dtype"])
+    if engine == "h3":
+        prompt = make_h3_prompt(
+            h3_ref_tags(has_c, has_p),
+            pose_description_en=pose.description_en if pose else "")
+        flow, out_id = build_h3(
+            refs=names, width=w, height=h, prompt=prompt,
+            steps=H3_STEPS, cfg=H3_CFG, sampler=CFG["sampler"],
+            scheduler=CFG["scheduler"], unet=H3_UNET, clip=H3_CLIP, vae=H3_VAE)
+    else:
+        tags = ref_tags(has_c, has_p)
+        prompt = make_prompt(tags,
+                             costume_keywords=costume.keywords if costume else "",
+                             pose_name=pose.name if pose else "",
+                             pose_angle=pose.angle if pose else "",
+                             pose_description=pose.description if pose else "")
+        flow, out_id = build(
+            refs=names, width=w, height=h, prompt=prompt,
+            negative=make_negative(tags),
+            steps=CFG["steps"], cfg=CFG["cfg"], sampler=CFG["sampler"],
+            scheduler=CFG["scheduler"], unet=CFG["unet"], clip=CFG["clip"],
+            vae=CFG["vae"], clip_type=CFG["clip_type"],
+            weight_dtype=CFG["weight_dtype"], ref_resolution=CFG["ref_resolution"],
+            cache_device=CFG["cache_device"], cache_dtype=CFG["cache_dtype"])
 
     t0 = time.time()
     pid = client.queue(flow)
@@ -108,7 +123,7 @@ def main():
         raise ComfyError("没有输出图片")
     data = client.fetch(imgs[0])
     out = os.path.join(CFG["output_dir"],
-                       "_pipeline_test_%s_%s.png" % (ratio.replace(":", "x"), mode))
+                       "_pipeline_test_%s_%s_%s.png" % (ratio.replace(":", "x"), mode, engine))
     with open(out, "wb") as f:
         f.write(data)
     print(f"[5/5] 完成，用时 {time.time()-t0:.1f}s，输出 {out} ({len(data)//1024} KB)")

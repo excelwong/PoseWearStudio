@@ -1,7 +1,13 @@
 # -*- coding: utf-8 -*-
 """后台生成线程：上传 → 排队 → 轮询 → 保存。显存不足时自动降档重试。
 
-参考图顺序与 workflow.ref_tags() 严格一致：人物 → 服装（可选）→ 姿态（可选）。
+参考图顺序与 workflow.ref_tags() / h3_workflow.h3_ref_tags() 严格一致：
+人物 → 服装（可选）→ 姿态（可选）。Qwen 提示词用 <imageN>、H3 用 <Picture N>，
+编号规则相同，所以上传顺序对两个引擎通用。
+
+引擎由 job["engine"] 决定（缺省按像素预算推断）：16 MP 及以上走
+MiniMax-H3-Image，其余走 Qwen-Image 2.1。OOM 降档只在同引擎的档位内进行，
+不会在重试时把模型与提示词语种悄悄换掉。
 """
 import os
 import time
@@ -10,8 +16,10 @@ from datetime import datetime
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from comfy_client import ComfyClient, ComfyError, OOMError
+from config import clip_type_for
 from workflow import build
-from resolution import calc, tier_steps
+from h3_workflow import build_h3
+from resolution import calc, tier_steps, engine_for
 
 
 class GenerateWorker(QThread):
@@ -38,7 +46,7 @@ class GenerateWorker(QThread):
         return self._cancel
 
     def _upload_specs(self):
-        """按 <imageN> 顺序返回 [(类别, 本地路径, 上传名), ...]。"""
+        """按 <imageN> / <Picture N> 顺序返回 [(类别, 本地路径, 上传名), ...]。"""
         tag = self._tag()
         specs = [("person", self.job["person"], "pws_person_%s.png" % tag)]
         if self.job.get("costume"):
@@ -47,16 +55,40 @@ class GenerateWorker(QThread):
             specs.append(("pose", self.job["pose"], "pws_pose_%s.png" % tag))
         return specs
 
+    def _build_flow(self, engine, uploaded, w, h, prefix):
+        job = self.job
+        common = dict(
+            refs=uploaded, width=w, height=h, prompt=job["prompt"],
+            seed=job.get("seed") or None,
+            steps=job["steps"], cfg=job["cfg"],
+            sampler=self.cfg["sampler"], scheduler=self.cfg["scheduler"],
+            unet=job.get("unet") or self.cfg["unet"],
+            clip=job.get("clip") or self.cfg["clip"],
+            vae=job.get("vae") or self.cfg["vae"],
+            prefix=prefix,
+            strip_background=job.get("strip_background", False),
+        )
+        if engine == "h3":
+            # H3 无负面提示词、无 QwenImage21Cache、无参考图边长参数。
+            return build_h3(**common)
+        return build(
+            negative=job.get("negative"),
+            clip_type=clip_type_for(common["unet"], self.cfg["clip_type"]),
+            weight_dtype=self.cfg["weight_dtype"],
+            ref_resolution=job.get("ref_resolution", self.cfg["ref_resolution"]),
+            cache_device=self.cfg["cache_device"], cache_dtype=self.cfg["cache_dtype"],
+            **common)
+
     def run(self):
         job = self.job
         ratio = job["ratio"]
         mp = float(job["megapixels"])
-        tiers = tier_steps(mp)
-        if not tiers:
-            tiers = [mp]
+        engine = job.get("engine") or engine_for(mp)
+        engine_name = "MiniMax-H3-Image" if engine == "h3" else "Qwen-Image 2.1"
+        tiers = tier_steps(mp, engine=engine) or [mp]
 
         specs = self._upload_specs()
-        # 全裸 + 保持原姿势是合法的 1 张参考图模式（build() 支持 1~3 张）
+        # 全裸 + 保持原姿势是合法的 1 张参考图模式（两个 build 都支持 1~3 张）
         if len(specs) < 1:
             self.failed.emit("缺少人物照片，请先在「① 人物照片」中选择图片。")
             return
@@ -64,7 +96,8 @@ class GenerateWorker(QThread):
         uploaded = None
         last_err = None
         mode = " + ".join(k for k, _, _ in specs[1:]) or "仅人物原图"
-        self.stage.emit("生成模式：%s（%d 张参考图）" % (mode, len(specs)))
+        self.stage.emit("生成模式：%s（%d 张参考图 · %s）"
+                        % (mode, len(specs), engine_name))
 
         for idx, tier_mp in enumerate(tiers):
             if self._cancel:
@@ -73,26 +106,14 @@ class GenerateWorker(QThread):
             if idx > 0:
                 self.stage.emit(f"显存不足，自动降至 {w}×{h} 重试（{idx+1}/{len(tiers)}）")
             else:
-                self.stage.emit(f"目标 {w}×{h} · {w*h/1e6:.2f} MP")
+                self.stage.emit(f"目标 {w}×{h} · {w*h/1e6:.2f} MP · {engine_name}")
             try:
                 if uploaded is None:
                     self.stage.emit("上传参考图…")
                     uploaded = [self.client.upload(path, name)
                                 for _, path, name in specs]
-                flow, out_id = build(
-                    refs=uploaded,
-                    width=w, height=h, prompt=job["prompt"], negative=job.get("negative"),
-                    seed=job.get("seed") or None,
-                    steps=job["steps"], cfg=job["cfg"],
-                    sampler=self.cfg["sampler"], scheduler=self.cfg["scheduler"],
-                    unet=job.get("unet") or self.cfg["unet"],
-                    clip=job.get("clip") or self.cfg["clip"],
-                    vae=job.get("vae") or self.cfg["vae"],
-                    clip_type=self.cfg["clip_type"], weight_dtype=self.cfg["weight_dtype"],
-                    ref_resolution=job.get("ref_resolution", self.cfg["ref_resolution"]),
-                    cache_device=self.cfg["cache_device"], cache_dtype=self.cfg["cache_dtype"],
-                    prefix="PoseWearStudio/pw_" + self._tag(),
-                )
+                flow, out_id = self._build_flow(
+                    engine, uploaded, w, h, "PoseWearStudio/pw_" + self._tag())
                 self.stage.emit("已提交，正在生成…")
                 t0 = time.time()
 
@@ -114,7 +135,8 @@ class GenerateWorker(QThread):
                     f.write(data)
                 info = {"width": w, "height": h, "megapixels": w * h / 1e6,
                         "seconds": time.time() - t0, "ratio": ratio,
-                        "downgraded": idx, "prompt_id": pid, "mode": mode}
+                        "downgraded": idx, "prompt_id": pid, "mode": mode,
+                        "engine": engine}
                 self.done.emit(path, info)
                 return
             except OOMError as e:

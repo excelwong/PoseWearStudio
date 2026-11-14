@@ -2,8 +2,10 @@
 
 输入一张人物正面照片，选服装、选姿态、选输出比例，用本机 ComfyUI 生成指定画幅的高清写实人像。
 
-> **一句话结论**：要让本 App 正常运行，ComfyUI 侧需要 **1 个足够新的 ComfyUI + 3 个模型文件**，
+> **一句话结论**：默认的 Qwen-Image 2.1 路径需要 **1 个足够新的 ComfyUI + 3 个模型文件**，
 > **不需要任何第三方插件**，也**不需要导入任何工作流文件**（工作流由 App 用代码动态生成）。
+> 选到 `H3：16/18/20MP` 三档时自动切换 **MiniMax-H3-Image**，另需它的 3 个模型文件
+> （节点是 ComfyUI 核心内置，同样不需要插件）；详见 **3.7 节**。
 >
 > 本文提到的所有大小均为十进制 GB（1 GB = 10⁹ 字节）。
 
@@ -38,6 +40,18 @@ VAELoader ──┴→ TextEncodeQwenImage21 ───────────�
         prompt 中用 <image1> <image2> <image3> 按上传顺序引用
 ```
 
+选中 16 / 18 / 20 MP 三档时改由 `h3_workflow.py` 的 `build_h3()` 生成 H3 链路：
+
+```
+UNETLoader(H3 DiT) ──────────────────────────────────────→ KSampler
+CLIPLoader(type=minimax) ─┐                                 │ positive
+VAELoader(H3 VAE) ────────┴→ MiniMaxH3ImageConditioning ────┤ latent（节点自带目标宽高）
+                            ↑ LoadImage ×1~3 → images.image_1/_2/_3
+                              prompt 中用 <Picture 1> <Picture 2> <Picture 3> 引用
+                          ConditioningZeroOut(positive) ────→ KSampler.negative
+                          KSampler(6 步 / CFG 1) → VAEDecode → SaveImage
+```
+
 **因此 `workflows/` 目录里的 `.json` 只是参考与备份，删掉它们 App 照样能跑。**
 
 ---
@@ -61,7 +75,7 @@ C:\AI\ComfyUI-aki-v3\python\python.exe -c "import PyQt6, PIL, requests; print('O
 
 ---
 
-## 3. 必需模型（3 个文件）
+## 3. 必需模型（默认 Qwen 路径 3 个文件）
 
 模型仓库：**<https://huggingface.co/Comfy-Org/Qwen-Image-2.1>**
 国内镜像：**<https://hf-mirror.com/Comfy-Org/Qwen-Image-2.1>**
@@ -165,17 +179,19 @@ set HF_ENDPOINT=https://hf-mirror.com
 |---|---|---|
 | 基模 | `qwen-image-2.1-UC-int8_convrot.safetensors`、`qwen-image-2.1-UC-Q4_K_M.gguf`、`qwen-image-2.1-turbo-Q4_K_M.gguf` | 同名，位于 `models/diffusion_models/` |
 | Text Encoder | `qwen3-vl-8b-heretic-1.3.0-int8convrot.safetensors`、`qwen3vl_8b_int8_convrot.safetensors`、`qwen3vl_8b_w4a8.safetensors` | 带 `qwen_image_2.1\` 前缀，位于 `models/text_encoders/qwen_image_2.1/` |
-| VAE | `qwen_image_2.1_vae_bf16.safetensors`（唯一值） | 同名，位于 `models/vae/` |
+| VAE | `qwen_image_2.1_vae_bf16.safetensors`、`[H3] minimax_h3_image_vae_fp16.safetensors` | 同名，位于 `models/vae/` |
 
-**基模联动会一次套用三项推荐值**（`config.py` 的 `UNET_DEFAULTS`：Text Encoder、
-步数、生成分辨率档位）。启动时按当前基模套用一次，之后每次切换基模再套用一次；
-手工改过的这三项在下次切换基模前都不会被覆盖。
+**基模联动会一次套用五项推荐值**（`config.py` 的 `UNET_DEFAULTS`：Text Encoder、
+步数、生成分辨率档位、VAE、CFG）。启动时按当前基模套用一次，之后每次切换基模再套用一次；
+手工改过的值在下次切换基模前都不会被覆盖。带 `[H3] ` 前缀的三项是
+MiniMax-H3-Image 专用（见 3.7 节），由分辨率档位自动选中。
 
 | 基模 | Text Encoder 默认 | 步数默认 | 生成分辨率默认 |
 |---|---|---|---|
 | `qwen-image-2.1-UC-int8_convrot.safetensors` | `qwen3-vl-8b-heretic-1.3.0-int8convrot.safetensors` | 25 | `标准：2.4MP` |
 | `qwen-image-2.1-UC-Q4_K_M.gguf` | `qwen3vl_8b_int8_convrot.safetensors` | 25 | `低显存：1MP` |
 | `qwen-image-2.1-turbo-Q4_K_M.gguf` | `qwen3vl_8b_w4a8.safetensors` | 8 | `低显存：0.6MP` |
+| `[H3] minimax_h3_image_pruned_int8_convrot.safetensors` | `[H3] qwen3vl_32b_minimax_h3_int8_convrot.safetensors` | 6 | `H3：16MP` |
 
 > 档位名必须与 `resolution.py` 的 `TIERS` 键逐字一致；统一格式为「名称：数值MP」
 > （全角冒号、数值与 MP 之间不留空格，如 `标准：2.4MP`）；
@@ -185,7 +201,9 @@ set HF_ENDPOINT=https://hf-mirror.com
 三个 Text Encoder 现在都各自有对应基模；Turbo 只靠 8 步加速，CFG 仍是 1.0、euler / simple，
 两个 UC 版都是 25 步。`*.gguf` 基模（UC-Q4_K_M 与 Turbo）会自动改走 `UnetLoaderGGUF`，
 不需要在界面上另选工作流。切换档位会同步刷新「输出画幅比例」下方的分辨率备注与生成任务的
-`megapixels`。
+`megapixels`。**切到 16/18/20 MP 档位时另有一层「档位 → 引擎」联动**：自动换上
+H3 三件套、6 步 / CFG 1，并把提示词重建为英文（详见 3.7 节）；切回其它档位则恢复
+Qwen 默认三件套与 25 步。默认启动值仍是 Qwen + `标准：2.4MP`，没有变化。
 
 ### 3.6 低显存分辨率档位
 
@@ -196,10 +214,76 @@ set HF_ENDPOINT=https://hf-mirror.com
 | `低显存：1MP` | 832 × 1248 | 约 1.04 MP |
 | `低显存：0.6MP` | 640 × 960 | 约 0.61 MP |
 
-定义在 `resolution.py` 的 `TIERS`；显存不足时 `tier_steps()` 按
-9.4 → 7.2 → 5.3 → 2.4 → 1.5 → 1.0 → 0.6 逐档自动降级重试。
+定义在 `resolution.py` 的 `TIERS`；显存不足时 `tier_steps()` 在 **Qwen 档位内**按
+9.4 → 7.2 → 5.3 → 2.4 → 1.5 → 1.0 → 0.6 逐档自动降级重试（不会跨到 H3 档）。
 **低显存档位不用手工选**：切到 `qwen-image-2.1-UC-Q4_K_M.gguf` 自动带出 `低显存：1MP`，
 切到 Turbo GGUF 自动带出 `低显存：0.6MP`，同时换好各自的文本编码器与步数。
+
+### 3.7 MiniMax-H3-Image 双引擎（2026-11-12 新增）
+
+官网：<https://hf-mirror.com/MiniMaxAI/MiniMax-H3-Image>；模型卡要点：
+生成与编辑统一在一个 checkpoint、**6 个采样步、无 CFG（CFG=1）、不支持负面提示词**、
+参考图按上传顺序称 `<Picture 1> <Picture 2> …`、有效范围约 **4~20 MP**、**16 MP 左右最佳**、
+宽高必须是 **32 的倍数**（与本项目 `resolution.calc()` 的 `UNIT=32` 一致）。
+
+**本机所需 3 个模型文件**（都在 `C://AI//ComfyUI_Common//models//`，已通过 ComfyUI
+`/object_info` 只读核对可见）：
+
+| 用途 | 相对路径 | ComfyUI 节点 |
+|---|---|---|
+| DiT | `diffusion_models/minimax_h3_image_pruned_int8_convrot.safetensors` | `UNETLoader` |
+| Text Encoder | `text_encoders/minimax_h3/qwen3vl_32b_minimax_h3_int8_convrot.safetensors` | `CLIPLoader`，**`type = minimax`** |
+| VAE | `vae/minimax_h3_image_vae_fp16.safetensors` | `VAELoader` |
+
+节点 `MiniMaxH3ImageConditioning` / `ConditioningZeroOut` 是 **ComfyUI 核心内置**
+（`comfy_extras/nodes_minimax_h3.py`），**不需要安装任何插件**；官方 UI 模板在
+`C://AI//ComfyUI_Common//workflows//H3-Image//`，本项目不导入它，只按同样结构动态生成 API 工作流。
+
+**档位与联动**（`resolution.py` 的 `TIERS` + `config.py` 的 `ENGINE_PRESETS`）：
+
+| 档位 | 2:3 下实际尺寸 | 引擎 |
+|---|---|---|
+| `H3：16MP` | 3264 × 4896（15.98 MP） | MiniMax-H3-Image |
+| `H3：18MP` | 3456 × 5184（17.92 MP） | MiniMax-H3-Image |
+| `H3：20MP` | 3648 × 5472（19.96 MP） | MiniMax-H3-Image |
+| 其余 7 档（9.4 MP 及以下） | 同原表 | Qwen-Image 2.1（**沿用原默认值**） |
+
+选到这三档会自动套用 H3 三件套、6 步、CFG 1，并重建提示词；切回其它档位恢复 Qwen
+默认三件套与 25 步。启动默认值、原有档位尺寸与 Qwen 的 OOM 降档链都**没有变化**。
+H3 的降档只在 20 → 18 → 16 MP 内进行，避免重试时把模型和提示词语种悄悄换掉。
+`参考图边长` 输入框在 H3 模式下禁用（H3 由内置节点自行缩放参考图）。
+
+**提示词规范**（`h3_workflow.py` 的 `make_h3_prompt()`，参考 WorkBuddy
+`h3-image-prompt-writing` 技能的 edit 指南）：
+
+* 一整段**详细英文整图描述**，不用中文、不列点、不写编辑指令句。
+* 结构固定为「源内容定义 → 目标图总览 → 各 `<Subject N>` 的关系 → 变化与新增细节」；
+  参考图一律用 `<Picture N>`，与上传顺序（人物 → 服装 → 姿态）严格一致。
+* **姿态部分直接用 `_metadata.csv` 的「姿态描述_英文」列**（同一姿态 5 个角度各有一行），
+  该列已含画幅、躯体、手臂手指、腿脚、脸部朝向与镜头方向；缺列时降级为英文通用句。
+  服装库关键词是中文，按 H3 规范不写入英文提示词，服装内容由 `<Picture 2>` 本身定义。
+* H3 不支持负面提示词；需要排除文字 / 水印时写在正文里（`No lettering, text or
+  watermarks appear.`），`make_negative()` 的结果只传给 Qwen。
+* 「保持原图背景」在 H3 下把背景与光线定义为一个 `<Subject N>` 并标记
+  `is fully preserved`；「纯白背景」「透明背景」分别改用 `BG_WHITE_EN` /
+  `BG_TRANSPARENT_EN` 的英文背景句。H3 不支持负面提示词，三种背景都写在正文里。
+* 全裸模式改用中性的英文叙述（`shown without clothing`），并加入身体特征描述：
+  `slim, hourglass figure with a narrow waist and a full bust, rosy nipples, smooth bare skin, 
+  and sparse pubic hair`。不携带 Qwen 侧的 `completed_nude,...`
+  标签串——H3 是自然语言模型，标签串不符合它的提示词规范。
+
+**采样与工作流**：`steps=6`、`cfg=1`、euler / simple；因为无 CFG，官方模板用
+`ConditioningZeroOut(positive)` 作为 `KSampler.negative`，本项目照此实现。
+`MiniMaxH3ImageConditioning` 同时输出 positive conditioning 与目标尺寸的空白 latent，
+因此不需要 `EmptyLatentImage` / `QwenImage21Cache`。参考图走该节点的 Autogrow
+动态输入 `images.image_1` / `_2` / `_3`（前缀 `image_`、最多 100 槽），与官方
+UI 模板 `minimax-h3-image-edit.json` 里的输入名逐字一致；`image_1` 是被编辑的人物图。
+API 样例见 `workflows/api_workflow_h3_image_example.json`。
+
+> 官网给出的 16 MP 常见尺寸是固定表（如 2:3 = 3360×5024）；本项目按用户选的画幅比例
+> 用 MP 预算换算，宽高严格等于比例且为 32 的倍数，因此实际像素数会略偏离标称值
+> （与原有 Qwen 档位同一套 `calc()` 行为，例如 9:16 下 20 MP 档约为 21.2 MP）。
+> 16 MP 是官方推荐值；20 MP 属上限，显存不足会自动降档。
 
 ---
 
@@ -248,7 +332,7 @@ ComfyUI 支持两种 JSON 格式，容易混淆：
   **不能直接 POST 给 `/prompt`**。
 - **API 格式**（`{"节点ID": {"class_type": ..., "inputs": ...}}`）：App 用这种。
 
-本项目 `workflows/` 里放了三份 API 格式样例，对应三个基模（可直接 POST `/prompt`，
+本项目 `workflows/` 里放了四份 API 格式样例（三份 Qwen 基模 + 一份 H3-Image，可直接 POST `/prompt`，
 需先把 3 张参考图上传进 ComfyUI 的 `input/`；两份 GGUF 版还需装好 ComfyUI-GGUF 插件）：
 
 | 文件 | 基模 / 工作流差异 | 说明 |
@@ -256,10 +340,76 @@ ComfyUI 支持两种 JSON 格式，容易混淆：
 | `api_workflow_example.json` | `qwen-image-2.1-UC-int8_convrot.safetensors` | 节点 `1` = `UNETLoader`（带 `weight_dtype`），text encoder = heretic，steps 25，1344×1792，seed 固定 |
 | `api_workflow_uc_q4_gguf_example.json` | `qwen-image-2.1-UC-Q4_K_M.gguf` | 节点 `1` = `UnetLoaderGGUF`（只有 `unet_name`），text encoder = `qwen3vl_8b_int8_convrot.safetensors`，steps 25 |
 | `api_workflow_turbo_gguf_example.json` | `qwen-image-2.1-turbo-Q4_K_M.gguf` | 节点 `1` = `UnetLoaderGGUF`，text encoder = `qwen3vl_8b_w4a8.safetensors`，steps 8 |
+| `api_workflow_h3_image_example.json` | `minimax_h3_image_pruned_int8_convrot.safetensors` | 节点 `20` = `MiniMaxH3ImageConditioning`、节点 `33` = `ConditioningZeroOut`，`type=minimax`、steps 6 / CFG 1，英文单段落提示词用 `<Picture N>`，3264×4896 |
 
-**三份样例的差异只可能出现在节点 `1`（loader）、text encoder 文件名与步数这三处**
+**三份 Qwen 样例的差异只可能出现在节点 `1`（loader）、text encoder 文件名与步数这三处**
 （UC int8 与 UC-Q4 同为 25 步，节点 `30` 也相同），其余节点完全一致；
 App 里由 `workflow.py build()` 按 `.gguf` 后缀自动选择 loader，切换基模时套用推荐组合。
+
+### 保持原姿势：锁定原大小 / 原位置 / 原姿势 / 原表情
+
+姿态页勾选「不换姿势 · 保持原姿势」（即没有姿态参考图）时，除了保持姿势，
+**还必须保持人物在原图中的大小、画面位置与面部表情**。这四项由提示词统一约束
+（桌面版 `workflow.py` / `h3_workflow.py`，安卓版 `Prompt.kt` / `H3Prompt.kt` 逐字对应）：
+
+- **`keep_pose_line()`**（Qwen 中文）：明确写「人物不放大、不缩小、不平移、不重新构图、
+  不裁切，头部、手脚及身体各部位到画幅边缘的距离都与原图一致」，并锁定四肢位置、
+  手指状态、身体朝向、头部角度、镜头角度，以及**面部表情、眼神与视线方向、眉眼状态、
+  嘴型与所有微表情**。H3 侧对应 `KEEP_POSE_RELATION_EN` 单段落英文叙述。
+- **构图句换成 `SCENE_TAIL_KEEP_POSE`**：原来的 `根据输出画幅合理构图，人物完整入画、
+  不裁切头脚` 会主动要求模型重新摆位缩放人物，半身 / 近景原图还会被强行拉成全身，
+  与「保持原大小、原位置」直接冲突。保持原姿势时整句改为「保持<image1> 的原始取景与构图，
+  人物在画面中的大小、位置与透视关系按原图等比延续，不因输出画幅重新构图」；
+  H3 侧同时把画幅描述从 `full-length / upper-body portrait` 降级为 `portrait`，
+  构图细节句改为 `KEEP_POSE_FRAMING_EN`。
+- **负面词**（仅 Qwen 有）：`NEGATIVE_KEEP_POSE` 追加「人物变大或变小，人物位置偏移，
+  重新构图，裁切头脚，面部表情改变，眼神或嘴型变化」。H3 不支持负面词。
+- **适用范围**：只换装 / 双保持去背 / 全裸且保持原姿势，所有 `pose` 为空的分支
+  都走这套约束；有姿态参考图时提示词完全不变。
+- 「保持原图背景」的幂等替换 `apply_keep_background()` 同时兼容默认版与保持原姿势版的
+  构图整句，替换后四项约束仍由 `keep_pose_line()` 独立承担，不会丢失。
+
+> 提示：输出画幅比例与原图差异越大，模型越难维持等比取景；保持原姿势时建议把分辨率
+> 档位的宽高比选得与原图一致。
+
+### 双保持「去背」模式（生成后抠成透明 PNG）
+
+### 「背景」下拉（三种背景模式）
+
+左侧三个 tab 之后、安卓版「4.生成」页顶部固定条，都有一个**背景下拉框**，三选一，
+**默认「保持原图背景」**，且**选择会自动保存**：桌面版写 `user_prefs.json`
+（不覆盖用户手工维护的 `config.json`），安卓版写 `SharedPreferences` 的 `bgMode`，
+下次打开应用直接沿用上次选中的项。
+
+| 选项 | 提示词 | 工作流 | 输出 |
+| --- | --- | --- | --- |
+| 保持原图背景（默认） | 末尾整句 `保持<image1> 的背景、光线不变。`，H3 把背景与光线定义为一个 `<Subject N>` 并标记 `is fully preserved` | 不变（普通生成） | 不透明 PNG |
+| 纯白背景 | 背景替换为纯净均匀的纯白摄影棚背景，负面词抑制背景杂物与阴影 | 不变（普通生成） | 白底不透明 PNG |
+| 透明背景 | 背景压成纯净均匀的单一浅色平涂色，便于精确抠图 | `VAEDecode → SplitImageWithAlpha(41) → BiRefNetRMBG(40) → SaveImage(32)` | **RGBA 透明 PNG** |
+
+要点：
+
+- 三种背景对**所有生成模式**都生效（只换装 / 只换姿势 / 换装+换姿势 / 全裸 /
+  双保持「原样保留」），不再与任何素材选项互斥；模式标签会追加当前背景名。
+- 「双保持」＝服装页勾「保持原服装」**且**姿态页勾「保持原姿势」，参考图只有人物
+  原图 1 张，`_plain_mode()` / `plainMode()` 识别它；此时 Qwen 走
+  `make_plain_prompt(bg_mode)` / `NEGATIVE_PLAIN`，H3 走
+  `make_h3_plain_prompt(bg_mode)`（英文单段落、无负面词）。**背景由下拉决定**，
+  不再固定去背；想拿透明 PNG 就把下拉选成「透明背景」。
+- 纯白 / 透明两种模式的 Qwen 负面词统一经 `with_bg_negative()` 追加
+  `NEGATIVE_BG_CLUTTER`；H3 不支持负面提示词，全部写在正文里。
+- `BiRefNetRMBG` 来自 ComfyUI-RMBG 插件，默认模型 `BiRefNet_lite`（177 MB，
+  处理分辨率 1024）。权重放在 `ComfyUI/models/RMBG/BiRefNet/`（`birefnet_lite.py`、
+  `BiRefNet_config.py`、`BiRefNet_lite.safetensors`、`config.json`），
+  **服务端一份即可，桌面版与安卓版共用**。换更大的模型改 `config.py` 的 `RMBG_MODEL`。
+- 插件的 `process_image()` 用 `params["mask_blur"]` 直接索引 optional 参数，
+  所以 API 格式下 `mask_blur / mask_offset / invert_output / background` 必须显式传，
+  统一由 `config.rmbg_inputs()` 生成（安卓版是 `Rmbg.inputs()`）。
+- `SplitImageWithAlpha` 不能省：Qwen 的 VAE 解出 4 通道，BiRefNet 只接受 3 通道，
+  否则报 `tensor a (4) must match tensor b (3)`；该节点对 3 通道输入原样返回。
+- 双保持同样属于「保持原姿势」，因此也套用上一节的四项锁定：构图句用
+  `STRIP_BG_TAIL_KEEP_POSE`（中文）/ `KEEP_POSE_FRAMING_EN`（H3），
+  不再写「根据输出画幅合理构图」或指定 full-length / half-body 画幅。
 
 ### 官方工作流模板下载地址
 
@@ -312,13 +462,19 @@ PoseWearStudio/
    `run.bat` 会检测 8188 端口，没开就自动拉起 ComfyUI；文件本身必须保持 **CRLF 行尾 + 纯 ASCII**。
 3. 界面顶部显示「ComfyUI 已连接 · xx GB 显存可用」即就绪。
 
+**左侧「① 人物照片」**：选图或拖放后，图片下方会显示原图分辨率（`宽 × 高`、MP、
+宽高比）与最接近的 9 种画幅比例之一（附偏差 %），并给出输出比例建议。判定在
+`resolution.py` 的 `nearest_ratio()`：以 `|ln(原图宽高比 / 候选比例)|` 为距离，
+横幅 / 竖幅互为倒数时判定对称；文案由 `photo_info_text()` 生成，安卓版逐字一致。
+
 **右侧分栏**：默认「生成」tab 的最上方是「提示词」控件组（在原来 180px 基础上，
 按当前字体行高再增加 2 行可见高度，带常显的垂直滚动条，内容更长时直接滚动查看）；
 下方左侧是「输出画幅比例」：9 个比例按钮竖向一列（默认选中 `2:3`），
 组底部备注只显示最终分辨率，形如 `1280:1920`，不再显示比例键、px 与 MP；
 「打开输出目录」「另存为」两个按钮也放在这一列、比例组的下方。
 右侧「生成结果」只保留预览图与结果信息，预览区因此可以用满剩余高度。
-不常调整的「生成分辨率」（含「低显存：1MP」「低显存：0.6MP」两档）与「生成参数」
+不常调整的「生成分辨率」（含「低显存：1MP」「低显存：0.6MP」两档，以及
+`H3：16/18/20MP` 三档，见 3.7 节）与「生成参数」
 （步数 / CFG / 种子 / 参考图边长 + 基模、Text Encoder、VAE 三个模型下拉）在「分辨率与参数」tab。
 切换基模会自动套用推荐 text encoder、步数与分辨率档位三项，详见 3.5 节。
 「开始生成」「中断当前任务」、进度与状态固定在右侧底栏，两个 tab 下都可见。
@@ -327,16 +483,18 @@ PoseWearStudio/
 
 **左侧三个 tab 之后的「保持原图背景」选项**：勾选后，自动生成提示词末尾的整句
 
-> `根据输出画幅合理构图，人物完整入画、不裁切头脚，光线自然柔和，背景简洁干净，真实皮肤质感，高细节、高清晰度，专业人像摄影，无文字无水印。`
+**左侧三个 tab 之后的「背景下拉框」**：三选一（保持原图背景 / 纯白背景 / 透明背景），
+默认「保持原图背景」，选择写入 `user_prefs.json`，下次启动自动恢复。
 
-会被替换为
+三种背景的提示词整句分别由 `workflow.py` 的 `bg_scene_tail()` / `BG_PARA_WHITE` /
+`BG_PARA_TRANSPARENT` 与 `h3_workflow.py` 的 `bg_en()` / `BG_WHITE_EN` /
+`BG_TRANSPARENT_EN` 生成（安卓版 `Prompt.kt` / `H3Prompt.kt` 逐字对应），
+不再是「勾选后做一次幂等整句替换」。默认「保持原图背景」时末尾整句为
 
 > `保持<image1> 的背景、光线不变。`
 
-对所有模式（只换装 / 只换姿势 / 换装+换姿势 / 全裸）都生效，右侧模式标签会追加「· 保持原图背景」；
-取消勾选即恢复默认文案。若手工改过提示词，重新点选素材或切换任一选项即可按当前状态重建。
-这些文案定义在 `workflow.py` 的 `SCENE_TAIL` / `SCENE_TAIL_UPPER` / `SCENE_TAIL_KEEP_BG`
-常量与 `scene_tail()` / `keep_bg_tail()` 里，替换逻辑在 `apply_keep_background()`，是唯一来源。
+若手工改过提示词，切换背景下拉、重新点选素材或切换任一选项即可按当前状态重建。
+右侧模式标签会追加当前背景名。
 **姿态库「上半身单人」系列的半身构图**（2026-11-10 与安卓版同步）：该系列是半身 / 胸像参考图，
 不能要求「人物完整入画、不裁切头脚」。只要「③ 选择姿态」的系列下拉选到「上半身单人」，
 或选中的姿态图属于该系列（CSV「系统」列），提示词里的构图句就会自动换成
@@ -345,9 +503,11 @@ PoseWearStudio/
 
 整句其余部分（光线、皮肤质感、画质、无水印）保持不变；系列下拉一变就立即重建提示词，
 右侧模式标签追加「· 半身构图」。判定优先级与安卓版一致：**选中姿态图 > 系列下拉**；
-勾选「不换姿势 · 保持原姿势」或「全裸 · 无服装」且没有姿态参考图时不按系列推断，仍用全身构图句。
+勾选「不换姿势 · 保持原姿势」或「全裸 · 无服装」且没有姿态参考图时不按系列推断，
+改用「保持原取景」专用构图句 `SCENE_TAIL_KEEP_POSE`（见上节），不再写全身 / 半身要求。
 勾选「保持原图背景」时，半身模式替换成 `保持<image1> 的背景、光线不变。` 之后会补回半身构图句，
-不会把构图信息一起丢掉（替换仍幂等）；全裸模式同样生效。
+不会把构图信息一起丢掉（替换仍幂等）；全裸模式同样生效。保持原姿势版的构图整句也能被同一函数
+幂等替换，替换后大小 / 位置 / 表情的约束句仍保留。
 常量 `UPPER_BODY_SYSTEM` / `FRAME_FULL` / `FRAME_UPPER` 定义在 `workflow.py`，
 与安卓版 `Prompt.kt` 逐字对应。`test_pipeline.py` 不经过界面，默认仍是全身构图句，
 需要半身时给 `make_prompt()` 传 `upper_body=True` 即可。
@@ -358,14 +518,15 @@ PoseWearStudio/
 画幅、躯体姿势、手臂手掌手指、腿部与脚、脸部朝向、镜头方向，且同一姿态的 5 个角度各有
 独立描述。`catalog.py` 把该列读进 `Pose.description`，`workflow.py` 的
 `pose_reference_line()` 生成整句，`make_prompt()` 与全裸模式 `app.py._nude_prompt()`
-共用它（安卓版 `Prompt.kt` 逐字对应）。
+共用它（安卓版 `Prompt.kt` 逐字对应）。全裸模式不再使用 `completed_nude,...` 标签串，
+改为中文自然语言：「纤细沙漏型身材，窄腰，丰满的胸部，粉嫩乳头，光滑裸露的肌肤，阴部有稀疏的阴毛」。
 
 已**移除**按「角度」列追加的 `，XX视角` 与 `脸部朝下。` 等短句（`FACE_DIRECTION` 双端删除），
 避免与描述列里已有的脸部朝向、镜头方向重复或冲突。`<imageN>` 按上传顺序动态分配：
 服装 + 姿态为 `<image3>`，只选姿态 / 全裸 + 姿态为 `<image2>`。
 若素材库是旧版 CSV（缺「姿态描述_中文」列），会降级为「姿态名 + 角度视角。」并在启动时
 给出提示；请把项目内更新后的 `_metadata.csv` 同步到素材库目录。
-「保持原图背景」只替换末尾的构图/背景整句，姿态参考句不受影响。
+「保持原图背景」只替换末尾的构图/背景整句，姿态参考句与「保持原姿势」的四项约束句都不受影响。
 
 命令行自检（不依赖界面，验证「上传 → 出图 → 落盘」全链路）：
 

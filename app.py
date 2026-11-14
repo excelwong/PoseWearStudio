@@ -14,7 +14,7 @@ from PyQt6.QtCore import Qt, QSize, QThread, pyqtSignal, QTimer, QUrl
 from PyQt6.QtGui import (QColor, QDesktopServices, QFont, QFontDatabase, QIcon,
                           QPainter, QPen, QPixmap)
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFrame,
+    QApplication, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFrame,
     QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar,
     QPushButton, QSizePolicy, QSpinBox, QSplitter, QTabWidget,
@@ -25,13 +25,17 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
 
 from config import (CFG, UNET_MODELS, CLIP_MODELS, VAE_MODELS,  # noqa: E402
-                    UNET_DEFAULTS)
+                    UNET_DEFAULTS, ENGINE_PRESETS, BG_MODES, BG_MODE_LABELS,
+                    DEFAULT_BG_MODE, save_pref)
 from catalog import Catalog                              # noqa: E402
-from resolution import RATIOS, TIERS, describe            # noqa: E402
+from resolution import (RATIOS, TIERS, describe, engine_for,  # noqa: E402
+                        engine_for_tier, H3_MIN_MP, photo_info_text)
 from workflow import (make_prompt, make_negative, ref_tags,  # noqa: E402
-                      validate_prompt, apply_keep_background, scene_tail,
-                      keep_bg_tail, pose_reference_line, UPPER_BODY_SYSTEM,
-                      SCENE_TAIL_KEEP_BG)
+                      validate_prompt, bg_scene_tail, make_plain_prompt,
+                      pose_reference_line, UPPER_BODY_SYSTEM, with_bg_negative,
+                      NEGATIVE_PLAIN, keep_pose_line, NEGATIVE_KEEP_POSE)
+from h3_workflow import (make_h3_prompt, h3_ref_tags,  # noqa: E402
+                         validate_h3_prompt, make_h3_plain_prompt)
 from thumbs import ThumbCache, ThumbWorker               # noqa: E402
 from generator import GenerateWorker                     # noqa: E402
 from comfy_client import ComfyClient                     # noqa: E402
@@ -70,6 +74,8 @@ QTabBar::tab:selected { background:#ffffff; color:#2563eb; font-weight:600; }
 QProgressBar { border:1px solid #e3e8ef; border-radius:6px; background:#ffffff; height:16px; text-align:center; }
 QProgressBar::chunk { background:#2563eb; border-radius:5px; }
 QLabel#hint { color:#7b8798; font-size:9pt; }
+QLabel#photoinfo { color:#1d4ed8; font-size:9pt; background:#eef4ff;
+                   border:1px solid #d5e2ff; border-radius:6px; padding:6px 8px; }
 QLabel#title { font-size:16pt; font-weight:700; color:#0f172a; }
 QLabel#sub { font-size:9pt; color:#7b8798; }
 """
@@ -98,6 +104,7 @@ class PhotoDrop(QLabel):
         self.setObjectName("photodrop")
         self.path = None
         self._pix = None
+        self.size_px = (0, 0)     # 原始图像素尺寸 (w, h)
         self._reset()
 
     def _reset(self):
@@ -115,6 +122,7 @@ class PhotoDrop(QLabel):
             return
         self.path = path
         self._pix = pm
+        self.size_px = (pm.width(), pm.height())
         self.setStyleSheet("#photodrop{border:1px solid #d8dee8;border-radius:12px;background:#ffffff;}")
         self._draw()
 
@@ -171,6 +179,7 @@ class Browser(QWidget):
         # 「全裸」按钮只有服装页会创建；基类先占位，姿态页点「保持原姿势」
         # 时才不会因访问不存在的 self.nude_btn 抛 AttributeError（进而被 PyQt abort）。
         self.nude_btn = None
+        self.half_body_btn = None
 
         self.filter_bar = QHBoxLayout()
         self.filter_bar.setContentsMargins(0, 0, 0, 0)
@@ -295,13 +304,22 @@ class Browser(QWidget):
             self.info.setText("未选择：请点选素材，或勾选「%s」" % self.keep_btn.text())
         self.selectionChanged.emit(None)
 
+    def _toggle_half_body(self, checked):
+        """勾选 = 生成半身照，全裸提示词中不写阴毛描述。
+
+        只触发提示词重建，发当前选中项而非 None，否则 MainWindow._on_pose(None)
+        会把用户已经选好的姿态参考图清掉。
+        """
+        self.half_body_btn.setChecked(checked)
+        self.selectionChanged.emit(self.selected)
+
     def _toggle_nude(self, checked):
         self.nude_btn.setChecked(checked)
         if checked:
             self.keep_btn.setChecked(False)
             self.selected = None
             self.list.clearSelection()
-            self.info.setText("已设为全裸（无服装，附加 completed_nude,slimthick body type with large prominent chest,with a slim waist and a full bust,huge_breasts,large_breasts,small_nipples,sparse_pubic_hair）")
+            self.info.setText("已设为全裸（无服装，附加纤细沙漏型身材，窄腰，丰满的胸部，粉嫩乳头，光滑裸露的肌肤，阴部有稀疏的阴毛）")
         else:
             self.info.setText("未选择：请点选素材，或勾选「%s」" % self.keep_btn.text())
         self.selectionChanged.emit(None)
@@ -319,7 +337,7 @@ class CostumeBrowser(Browser):
         self.nude_btn = QPushButton("全裸 · 无服装")
         self.nude_btn.setObjectName("keep")
         self.nude_btn.setCheckable(True)
-        self.nude_btn.setToolTip("勾选后生成全裸人像（附加 completed_nude,slimthick body type with large prominent chest,with a slim waist and a full bust,huge_breasts,large_breasts,small_nipples,sparse_pubic_hair）")
+        self.nude_btn.setToolTip("勾选后生成全裸人像（附加纤细沙漏型身材，窄腰，丰满的胸部，粉嫩乳头，光滑裸露的肌肤，阴部有稀疏的阴毛）")
         self.nude_btn.clicked.connect(self._toggle_nude)
         self.filter_bar.addWidget(self.nude_btn)
         self.cat = QComboBox()
@@ -353,6 +371,13 @@ class PoseBrowser(Browser):
         super().__init__(cache, page_size,
                          keep_text="不换姿势 · 保持原姿势",
                          keep_hint="已设为保持原照片中的姿势（只更换服装）")
+        # 姿态库独有的「半身照」toggle：选中后全裸提示词不写阴毛描述
+        self.half_body_btn = QPushButton("半身照")
+        self.half_body_btn.setObjectName("keep")
+        self.half_body_btn.setCheckable(True)
+        self.half_body_btn.setToolTip("勾选后生成半身照，全裸提示词中不写阴毛描述")
+        self.half_body_btn.clicked.connect(self._toggle_half_body)
+        self.filter_bar.addWidget(self.half_body_btn)
         self.sys = QComboBox()
         self.sys.addItem("全部系列")
         self.sys.addItems(sorted({p.system for p in catalog.poses}))
@@ -441,12 +466,15 @@ class MainWindow(QMainWindow):
         self.cache = ThumbCache(cfg["cache_dir"])
         self.ratio = "2:3"
         self.megapixels = float(cfg["megapixels"])
+        self.engine = engine_for(self.megapixels)
+        self._syncing = False       # 引擎联动期间抑制「基模↔档位」递归
+        self._ui_ready = False      # 构造期信号不重建提示词
         self.costume = None
         self.pose = None
         self.gen_worker = None
         self.last_result = None
         self.ratio_buttons = {}
-        self.keep_bg_cb = None       # 在 _build_ui() 中创建；构造期信号触发时安全
+        self.bg_combo = None         # 在 _build_ui() 中创建；构造期信号触发时安全
 
         self.setWindowTitle("衣姿工坊 · PoseWear Studio")
         self.resize(1500, 950)
@@ -463,7 +491,7 @@ class MainWindow(QMainWindow):
         titles = QVBoxLayout()
         t = QLabel("衣姿工坊  PoseWear Studio")
         t.setObjectName("title")
-        s = QLabel("人物照片 + 服装参考 + 姿态参考  →  指定画幅的高清写实人像（本机 ComfyUI / Qwen-Image 2.1）")
+        s = QLabel("人物照片 + 服装参考 + 姿态参考  →  指定画幅的高清写实人像（本机 ComfyUI / Qwen-Image 2.1 · MiniMax-H3-Image）")
         s.setObjectName("sub")
         titles.addWidget(t)
         titles.addWidget(s)
@@ -489,6 +517,7 @@ class MainWindow(QMainWindow):
         # ---------- 左侧：三步输入 ----------
         tabs = QTabWidget()
         self.photo = PhotoDrop()
+        self.photo.fileChanged.connect(self._on_photo_changed)
         ptab = QWidget()
         pl = QVBoxLayout(ptab)
         pl.setContentsMargins(10, 10, 10, 10)
@@ -501,6 +530,11 @@ class MainWindow(QMainWindow):
         prow.addWidget(pick)
         prow.addWidget(self.person_label, 1)
         pl.addLayout(prow)
+        self.photo_info = QLabel("选择照片后，这里会显示原图分辨率与最接近的画幅比例。")
+        self.photo_info.setObjectName("photoinfo")
+        self.photo_info.setWordWrap(True)
+        self.photo_info.setTextFormat(Qt.TextFormat.PlainText)
+        pl.addWidget(self.photo_info)
         notice = QLabel("仅支持本人或已获授权的成年人肖像，请勿上传未成年人照片。")
         notice.setObjectName("hint")
         notice.setStyleSheet("color:#b45309;")
@@ -525,15 +559,28 @@ class MainWindow(QMainWindow):
         bgl = QVBoxLayout(bg_bar)
         bgl.setContentsMargins(14, 9, 14, 9)
         bgl.setSpacing(3)
-        self.keep_bg_cb = QCheckBox("保持原图背景")
-        self.keep_bg_cb.setObjectName("keepbg")
-        self.keep_bg_cb.setStyleSheet(
-            "QCheckBox#keepbg { font-size:10pt; font-weight:600; color:#1e293b; }")
-        self.keep_bg_cb.setToolTip(
-            "勾选后，提示词中的默认构图/光线/背景整句会替换为：%s；"
-            "「上半身单人」系列会保留半身构图约束。" % SCENE_TAIL_KEEP_BG)
-        self.keep_bg_cb.toggled.connect(self._on_keep_bg)
-        bgl.addWidget(self.keep_bg_cb)
+        bg_row = QHBoxLayout()
+        bg_row.setSpacing(6)
+        bg_lab = QLabel("背景：")
+        bg_lab.setObjectName("hint")
+        self.bg_combo = QComboBox()
+        self.bg_combo.setObjectName("bgcombo")
+        self.bg_combo.setStyleSheet(
+            "QComboBox#bgcombo { font-size:10pt; font-weight:600; color:#1e293b; }")
+        for m in BG_MODES:
+            self.bg_combo.addItem(BG_MODE_LABELS[m], m)
+        # 先设置选中项再连信号，避免构造期把默认值当成「用户修改」写盘
+        self.bg_combo.setCurrentIndex(BG_MODES.index(self.cfg.get(
+            "bg_mode", DEFAULT_BG_MODE)))
+        self.bg_combo.setToolTip(
+            "保持原图背景：保留原图的背景与光线；"
+            "纯白背景：提示词改为纯白摄影棚背景；"
+            "透明背景：生成后经 BiRefNet 抠图，输出 RGBA 透明 PNG。"
+            "选择会自动保存，下次打开沿用。")
+        bg_row.addWidget(bg_lab)
+        bg_row.addWidget(self.bg_combo, 1)
+        bgl.addLayout(bg_row)
+        self.bg_combo.currentIndexChanged.connect(self._on_bg_mode)
         self.bg_hint = QLabel()
         self.bg_hint.setObjectName("hint")
         self.bg_hint.setWordWrap(True)
@@ -593,7 +640,7 @@ class MainWindow(QMainWindow):
         g_param = QGroupBox("生成参数")
         pl2 = QGridLayout(g_param)
         self.steps = QSpinBox()
-        self.steps.setRange(8, 60)
+        self.steps.setRange(1, 60)   # H3-Image 官方为 6 步
         self.steps.setValue(int(self.cfg["steps"]))
         self.cfgv = QDoubleSpinBox()
         self.cfgv.setRange(0.5, 8.0)
@@ -606,6 +653,7 @@ class MainWindow(QMainWindow):
         self.refres.setRange(0, 4096)
         self.refres.setSingleStep(32)
         self.refres.setValue(int(self.cfg["ref_resolution"]))
+        self.refres.setToolTip("仅 Qwen-Image 2.1 使用；H3-Image 由内置节点自行缩放参考图")
         pl2.addWidget(QLabel("步数"), 0, 0); pl2.addWidget(self.steps, 0, 1)
         pl2.addWidget(QLabel("CFG"), 0, 2); pl2.addWidget(self.cfgv, 0, 3)
         pl2.addWidget(QLabel("种子(0=随机)"), 1, 0); pl2.addWidget(self.seed, 1, 1)
@@ -632,8 +680,8 @@ class MainWindow(QMainWindow):
         self.clip_combo = _mk_combo(CLIP_MODELS, self.cfg["clip"])
         self.vae_combo = _mk_combo(VAE_MODELS, self.cfg["vae"])
         self.unet_combo.setToolTip("扩散模型，位于 ComfyUI 的 models/diffusion_models/")
-        self.clip_combo.setToolTip("文本编码器，位于 models/text_encoders/qwen_image_2.1/")
-        self.vae_combo.setToolTip("Qwen-Image 2.1 只能用这个 VAE（唯一可选项）")
+        self.clip_combo.setToolTip("文本编码器，位于 models/text_encoders/ 下（H3 为 minimax_h3/ 子目录）")
+        self.vae_combo.setToolTip("VAE：Qwen 与 MiniMax-H3-Image 各有专用 VAE，切换档位会自动选择")
 
         row = 2
         for label, combo in (("基模", self.unet_combo),
@@ -771,28 +819,58 @@ class MainWindow(QMainWindow):
         cl.addWidget(split, 1)
         self.setCentralWidget(central)
         self._update_res_label()
+        self._ui_ready = True
 
     # ---------------- 交互 ----------------
     def _apply_unet_default(self, unet_value):
-        """套用推荐组合：text encoder + 默认步数 + 生成分辨率档位。
+        """套用推荐组合：text encoder + VAE + 步数 + CFG + 生成分辨率档位。
 
-        启动时与每次切换基模时各调用一次；用户之后手工改的 encoder / 步数 /
-        分辨率档位不会被覆盖，直到下次切换基模。
-        清单之外的自定义基模不联动，保留 config.json 里的原始值。
+        启动时与每次切换基模时各调用一次；用户之后手工改的值不会被覆盖，
+        直到下次切换基模。清单之外的自定义基模不联动。
+        引擎联动期间（_syncing）跳过，避免「档位→基模→档位」递归。
         """
+        if self._syncing:
+            return
         preset = UNET_DEFAULTS.get(unet_value)
         if not preset:
             return
-        clip_label, steps, tier_label = preset
+        clip_label, steps, tier_label, vae_label, cfg_value = preset
         i = self.clip_combo.findText(clip_label)
         if i >= 0:
             self.clip_combo.setCurrentIndex(i)
+        j = self.vae_combo.findText(vae_label)
+        if j >= 0:
+            self.vae_combo.setCurrentIndex(j)
         self.steps.setValue(steps)
+        self.cfgv.setValue(cfg_value)
         # setCurrentText 触发 currentTextChanged → _set_tier()，同步刷新
         # self.megapixels、档位说明与「输出画幅比例」下方的分辨率备注。
-        # 档位名必须在 TIERS 里，否则 _set_tier 的 TIERS[text] 会 KeyError。
         if tier_label in TIERS and self.tier.currentText() != tier_label:
             self.tier.setCurrentText(tier_label)
+
+    def _apply_engine(self, engine):
+        """按像素档位切换引擎：模型三件套 + 步数 + CFG（提示词由 _update_prompt 重建）。"""
+        preset = ENGINE_PRESETS[engine]
+        self._syncing = True
+        try:
+            self.engine = engine
+            for combo, key in ((self.unet_combo, "unet"),
+                               (self.clip_combo, "clip"),
+                               (self.vae_combo, "vae")):
+                i = combo.findData(preset[key])
+                if i >= 0:
+                    combo.setCurrentIndex(i)
+            self.steps.setValue(preset["steps"])
+            self.cfgv.setValue(preset["cfg"])
+            self.refres.setEnabled(engine != "h3")
+        finally:
+            self._syncing = False
+
+    def _on_photo_changed(self, path):
+        """选图 / 拖放后：图片下方显示原图分辨率与最接近的画幅比例。"""
+        self.person_label.setText(os.path.basename(path) if path else "未选择照片")
+        w, h = self.photo.size_px
+        self.photo_info.setText(photo_info_text(w, h))
 
     def _set_ratio(self, key):
         self.ratio = key
@@ -802,11 +880,30 @@ class MainWindow(QMainWindow):
 
     def _set_tier(self, text):
         self.megapixels = TIERS[text]
+        new_engine = engine_for_tier(text)
+        engine_changed = False
+        if self._syncing:
+            # 由基模推荐组合引起的档位变化，只同步引擎状态，不再反向联动
+            self.engine = new_engine
+            self.refres.setEnabled(new_engine != "h3")
+        elif new_engine != self.engine:
+            self._apply_engine(new_engine)
+            engine_changed = True
         self._update_tier_tip()
         self._update_res_label()
+        # 引擎变了要重建提示词（Qwen 中文 <imageN> ↔ H3 英文 <Picture N>）；
+        # 同引擎内换档位不动用户可能手工改过的提示词。
+        if self._ui_ready and not self._syncing and engine_changed:
+            self._update_prompt()
 
     def _update_tier_tip(self):
-        max_mp = max(TIERS.values())
+        if self.engine == "h3":
+            self.tier_tip.setText(
+                f"当前 {self.megapixels:.0f} MP · MiniMax-H3-Image：官方有效范围约 "
+                "4~20 MP、16 MP 左右效果最好；6 步 / CFG 1、无负面提示词、英文整图描述。"
+                "显存不足时只在 20/18/16 MP 三档内自动降档。尺寸严格符合比例且为 32 的倍数。")
+            return
+        max_mp = max(v for v in TIERS.values() if v < H3_MIN_MP)
         if self.megapixels >= max_mp - 1e-6:
             note = "本机实测最大直出分辨率（4K，约 3 分钟/张）"
         else:
@@ -828,8 +925,31 @@ class MainWindow(QMainWindow):
         self.pose = obj
         self._update_prompt()
 
-    def _keep_bg(self):
-        return bool(self.keep_bg_cb is not None and self.keep_bg_cb.isChecked())
+    def _plain_mode(self):
+        """服装页「保持原服装」+ 姿态页「保持原姿势」同时勾选 = 什么都不换。
+
+        此时只有 1 张人物原图；背景改由「背景」下拉决定，不再固定去背。
+        用 getattr 逐层保护：构造期信号触发时两个 browser / keep_btn 可能还没建好。
+        """
+        cb = getattr(self, "costume_browser", None)
+        pb = getattr(self, "pose_browser", None)
+        if cb is None or pb is None:
+            return False
+        cb_keep = getattr(cb, "keep_btn", None)
+        pb_keep = getattr(pb, "keep_btn", None)
+        nude = getattr(cb, "nude_btn", None)
+        if cb_keep is None or pb_keep is None:
+            return False
+        return (cb_keep.isChecked() and pb_keep.isChecked()
+                and not getattr(self, "costume", None)
+                and not getattr(self, "pose", None)
+                and not (nude is not None and nude.isChecked()))
+
+    def _bg_mode(self):
+        """当前「背景」下拉的值；控件尚未建立时回落到启动配置。"""
+        if self.bg_combo is None:
+            return self.cfg.get("bg_mode", DEFAULT_BG_MODE)
+        return self.bg_combo.currentData() or DEFAULT_BG_MODE
 
     def _upper_body(self):
         """姿态来自「上半身单人」系列时改用半身构图句（与安卓版一致）。
@@ -851,52 +971,78 @@ class MainWindow(QMainWindow):
         self._update_bg_hint()
         self._update_prompt()
 
-    def _on_keep_bg(self, _checked):
+    def _on_bg_mode(self, _index):
+        # 记住用户改过的选择：只写 user_prefs.json，不动用户手工维护的 config.json
+        bg = self._bg_mode()
+        self.cfg["bg_mode"] = bg
+        save_pref("bg_mode", bg)
         self._update_bg_hint()
         self._update_prompt()
 
     def _update_bg_hint(self):
-        if self._keep_bg():
+        # 构造期信号可能早于 bg_hint 创建，安全返回即可（窗口建好后会再刷一次）
+        if getattr(self, "bg_hint", None) is None:
+            return
+        bg = self._bg_mode()
+        if bg == "transparent":
             self.bg_hint.setText(
-                "已启用：提示词末尾改为「%s」" % keep_bg_tail(self._upper_body()))
+                "透明背景：提示词把背景压成纯净平涂色，生成图再经 BiRefNet 抠成 "
+                "RGBA 透明 PNG（需 ComfyUI 服务端装有 RMBG 权重）。")
+        elif bg == "white":
+            self.bg_hint.setText(
+                "纯白背景：提示词改为纯净均匀的纯白摄影棚背景，输出不透明 PNG；"
+                "负面词会抑制背景杂物与阴影。")
         else:
-            tail = "半身构图" if self._upper_body() else "全身构图"
             self.bg_hint.setText(
-                "未勾选：提示词末尾使用默认的构图、光线与简洁背景描述（%s）。" % tail)
+                "保持原图背景（默认）：提示词写明完整保留 <image1> / <Picture 1> "
+                "的背景与光线；半身构图约束仍会保留。H3 档位不支持负面提示词。")
 
     def _set_mode(self, text):
-        if self._keep_bg():
-            text += " · 保持原图背景"
+        if self.engine == "h3":
+            text += " · MiniMax-H3-Image（英文提示词）"
+        text += " · " + BG_MODE_LABELS.get(self._bg_mode(), BG_MODE_LABELS["keep"])
         if self._upper_body():
             text += " · 半身构图"
         self.mode_label.setText(text)
 
     def _set_prompt_text(self, text):
-        # 对自动生成的所有提示词（含全裸模式）统一替换，保证单一来源
-        if self._keep_bg():
-            text = apply_keep_background(text, self._upper_body())
+        # 三种背景的描述已经在各提示词生成函数里按 bg_mode 写好，不再二次替换
         self.prompt_edit.setPlainText(text)
 
     def _update_prompt(self):
         has_c, has_p = bool(self.costume), bool(self.pose)
         self.nude = self.costume_browser.nude_btn.isChecked()
         upper = self._upper_body()
+        bg = self._bg_mode()
+        plain = self._plain_mode()
+        self._update_bg_hint()
+        if plain:
+            self._set_mode("当前模式：原样保留（1 张参考图）")
+            self._set_prompt_text(
+                make_h3_plain_prompt(bg, upper) if self.engine == "h3"
+                else make_plain_prompt(bg, upper))
+            return
         if self.nude:
             label = ("全裸 + 换姿势（2 张参考图）" if has_p
                      else "全裸 · 保持原姿势（1 张参考图）")
             self._set_mode("当前模式：" + label)
-            self._set_prompt_text(self._nude_prompt(upper))
+            self._set_prompt_text(self._nude_prompt(
+                upper, self.engine == "h3", bg))
             return
         if not has_c and not has_p:
             self._set_mode(
-                "当前模式：未选择 —— 服装和姿态至少要选一项（或勾选全裸）")
+                "当前模式：未选择 —— 服装和姿态至少要选一项（或勾选全裸 / 两个保持原样）")
             lines = [
                 "# 请先在「② 选择服装」或「③ 选择姿态」中至少选择一项（也可两项都选）。",
                 "# 只选服装：保持原姿势、只换装；只选姿态：保持原服装、只换姿势。",
                 "# 两项都选：同时换装与换姿势。选择后本提示词会自动生成，也可自行修改。",
                 "# 在服装页勾选「全裸 · 无服装」可生成全裸人像（可搭配姿态参考）。",
-                "# 勾选左下角「保持原图背景」后，构图/背景描述改为：保持<image1> 的背景、光线不变。",
+                "# 两页的「保持原样」都勾选：什么都不换，只按左下角「背景」下拉处理背景。",
+                "# 背景下拉：保持原图背景 / 纯白背景 / 透明背景（生成后抠成 RGBA 透明 PNG）。",
+                "# 勾选「保持原姿势」时，会锁定人物在原图中的大小、位置、姿势与表情，并按原取景输出。",
+                "# 背景选择会自动保存，下次打开程序时沿用。",
                 "# 姿态选「上半身单人」系列时，构图句自动改为半身取景，不要求腿部入画。",
+                "# 选到 H3：16/18/20MP 时自动切换 MiniMax-H3-Image，提示词改为英文整图描述。",
             ]
             self._set_prompt_text(chr(10).join(lines))
             return
@@ -907,6 +1053,12 @@ class MainWindow(QMainWindow):
         else:
             label = "保持原服装，只换姿势（2 张参考图）"
         self._set_mode("当前模式：" + label)
+        if self.engine == "h3":
+            self._set_prompt_text(make_h3_prompt(
+                h3_ref_tags(has_c, has_p),
+                pose_description_en=self.pose.description_en if self.pose else "",
+                bg_mode=bg, upper_body=upper))
+            return
         tags = ref_tags(has_c, has_p)
         self._set_prompt_text(make_prompt(
             tags,
@@ -914,10 +1066,27 @@ class MainWindow(QMainWindow):
             pose_name=self.pose.name if self.pose else "",
             pose_angle=self.pose.angle if self.pose else "",
             pose_description=self.pose.description if self.pose else "",
-            upper_body=upper))
+            bg_mode=bg, upper_body=upper))
 
-    def _nude_prompt(self, upper_body=False):
+    def _nude_prompt(self, upper_body=False, h3=False,
+                     bg_mode=DEFAULT_BG_MODE):
         has_p = bool(self.pose)
+        # 按钮挂在姿态库浏览器上（MainWindow 本身没有该属性）
+        half_btn = getattr(getattr(self, "pose_browser", None),
+                           "half_body_btn", None)
+        half_body = half_btn is not None and half_btn.isChecked()
+        if h3:
+            # H3 用中性的英文整图叙述，不写 Qwen 侧的 nude 标签串
+            return make_h3_prompt(
+                h3_ref_tags(False, has_p),
+                pose_description_en=self.pose.description_en if self.pose else "",
+                bg_mode=bg_mode, upper_body=upper_body,
+                nude=True, half_body=half_body)
+        # 勾选「半身照」时省略阴毛描述
+        body_type = ("纤细沙漏型身材，窄腰，丰满的胸部，粉嫩乳头，光滑裸露的肌肤，"
+                     "阴部有稀疏的阴毛")
+        if half_body:
+            body_type = "纤细沙漏型身材，窄腰，丰满的胸部，粉嫩乳头，光滑裸露的肌肤"
         if has_p:
             tags = ref_tags(False, True)
             # 姿态参考句与 make_prompt 共用同一函数：统一前缀 + CSV「姿态描述_中文」
@@ -926,16 +1095,16 @@ class MainWindow(QMainWindow):
                 "让她完全脱光所有衣物，呈现全裸状态。\n"
                 + pose_reference_line(tags["pose"], self.pose.description,
                                       self.pose.name, self.pose.angle) + "\n"
-                + scene_tail(upper_body) + "\n"
-                + "completed_nude,slimthick body type with large prominent chest,with a slim waist and a full bust,huge_breasts,large_breasts,small_nipples,sparse_pubic_hair"
+                + bg_scene_tail(bg_mode, upper_body) + "\n"
+                + body_type
             )
         else:
             prompt = (
                 "以 <image1> 中的女性为主角，严格保持她的面部特征、五官、发型发色、肤色与体型不变。\n"
                 "让她完全脱光所有衣物，呈现全裸状态。\n"
-                "保持她原本的身体姿势不变。\n"
-                + scene_tail(upper_body) + "\n"
-                + "completed_nude,slimthick body type with large prominent chest,with a slim waist and a full bust,huge_breasts,large_breasts,small_nipples,sparse_pubic_hair"
+                + keep_pose_line("<image1>") + "\n"
+                + bg_scene_tail(bg_mode, upper_body, keep_pose=True) + "\n"
+                + body_type
             )
         return prompt
 
@@ -955,13 +1124,18 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "还差一步", "请先在「① 人物照片」中选择一张正面照片。")
             return
         self.nude = self.costume_browser.nude_btn.isChecked()
-        if not self.costume and not self.pose and not self.nude:
+        bg = self._bg_mode()
+        plain = self._plain_mode()
+        strip_bg = (bg == "transparent")
+        if not self.costume and not self.pose and not self.nude and not plain:
             QMessageBox.information(self, "还差一步", chr(10).join([
                 "服装和姿态至少要选择一项：", "",
                 "· 只选服装 → 保持原姿势，只换装",
                 "· 只选姿态 → 保持原服装，只换姿势",
                 "· 两项都选 → 同时换装与换姿势",
-                "· 勾选「全裸 · 无服装」 → 生成全裸人像（建议搭配姿态参考）"]))
+                "· 勾选「全裸 · 无服装」 → 生成全裸人像（建议搭配姿态参考）",
+                "· 两页的「保持原样」都勾选 → 什么都不换，按「背景」下拉处理背景",
+                "· 想要透明 PNG：把左下角「背景」选成「透明背景」"]))
             return
         if self.gen_worker and self.gen_worker.isRunning():
             return
@@ -973,27 +1147,37 @@ class MainWindow(QMainWindow):
             else:
                 tags = ref_tags(False, True)
                 n_images = 2
-            err = validate_prompt(text, n_images)
+            err = (validate_h3_prompt(text, n_images) if self.engine == "h3"
+                   else validate_prompt(text, n_images))
             if err:
                 QMessageBox.warning(self, "提示词需要更新", err)
                 return
-            negative = make_negative(ref_tags(False, True)) if has_p else "多个人物，多余肢体，畸形的手指，面部变形，身份不一致，服装，衣物，内衣"
+            negative = (make_negative(ref_tags(False, True)) if has_p else
+                        "多个人物，多余肢体，畸形的手指，面部变形，身份不一致，"
+                        "服装，衣物，内衣，" + NEGATIVE_KEEP_POSE)
         else:
-            tags = ref_tags(has_c, has_p)
             text = self.prompt_edit.toPlainText().strip()
             n_images = 1 + int(has_c) + int(has_p)
-            err = validate_prompt(text, n_images)
+            err = (validate_h3_prompt(text, n_images) if self.engine == "h3"
+                   else validate_prompt(text, n_images))
             if err:
                 QMessageBox.warning(self, "提示词需要更新", err)
                 return
-            negative = make_negative(tags)
+            # 双保持模式只有 1 张参考图，ref_tags(False, False) 会抛错，用专用负面词
+            negative = (NEGATIVE_PLAIN if plain
+                        else make_negative(ref_tags(has_c, has_p)))
+        # 纯白 / 透明背景额外抑制背景杂物与阴影
+        negative = with_bg_negative(negative, bg)
         job = {
             "person": self.photo.path,
             "costume": self.costume.path if has_c else None,
             "pose": self.pose.path if has_p else None,
             "nude": self.nude,
+            "strip_background": strip_bg,
+            "bg_mode": bg,
             "ratio": self.ratio,
             "megapixels": self.megapixels,
+            "engine": self.engine,
             "prompt": text,
             "negative": negative,
             "seed": self.seed.value(),
@@ -1036,9 +1220,10 @@ class MainWindow(QMainWindow):
                                              Qt.AspectRatioMode.KeepAspectRatio,
                                              Qt.TransformationMode.SmoothTransformation))
         down = f" · 自动降档 {info['downgraded']} 次" if info["downgraded"] else ""
+        eng = " · MiniMax-H3-Image" if info.get("engine") == "h3" else ""
         self.result_info.setText(
             f"{info['width']}×{info['height']} · {info['megapixels']:.2f} MP · "
-            f"{info['ratio']} · 用时 {info['seconds']:.0f} 秒{down}\n{path}")
+            f"{info['ratio']}{eng} · 用时 {info['seconds']:.0f} 秒{down}\n{path}")
         self.stage.setText("完成：" + os.path.basename(path))
 
     def _on_failed(self, msg):
