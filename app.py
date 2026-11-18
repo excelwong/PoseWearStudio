@@ -305,7 +305,7 @@ class Browser(QWidget):
         self.selectionChanged.emit(None)
 
     def _toggle_half_body(self, checked):
-        """勾选 = 生成半身照，全裸提示词中不写阴毛描述。
+        """勾选 = 生成白虎，全裸提示词中不写阴毛描述。
 
         只触发提示词重建，发当前选中项而非 None，否则 MainWindow._on_pose(None)
         会把用户已经选好的姿态参考图清掉。
@@ -371,11 +371,11 @@ class PoseBrowser(Browser):
         super().__init__(cache, page_size,
                          keep_text="不换姿势 · 保持原姿势",
                          keep_hint="已设为保持原照片中的姿势（只更换服装）")
-        # 姿态库独有的「半身照」toggle：选中后全裸提示词不写阴毛描述
-        self.half_body_btn = QPushButton("半身照")
+        # 姿态库独有的「白虎」toggle：选中后全裸提示词不写阴毛描述
+        self.half_body_btn = QPushButton("白虎")
         self.half_body_btn.setObjectName("keep")
         self.half_body_btn.setCheckable(True)
-        self.half_body_btn.setToolTip("勾选后生成半身照，全裸提示词中不写阴毛描述")
+        self.half_body_btn.setToolTip("勾选后生成白虎，全裸提示词中不写阴毛描述")
         self.half_body_btn.clicked.connect(self._toggle_half_body)
         self.filter_bar.addWidget(self.half_body_btn)
         self.sys = QComboBox()
@@ -1082,7 +1082,7 @@ class MainWindow(QMainWindow):
                 pose_description_en=self.pose.description_en if self.pose else "",
                 bg_mode=bg_mode, upper_body=upper_body,
                 nude=True, half_body=half_body)
-        # 勾选「半身照」时省略阴毛描述
+        # 勾选「白虎」时省略阴毛描述
         body_type = ("纤细沙漏型身材，窄腰，丰满的胸部，粉嫩乳头，光滑裸露的肌肤，"
                      "阴部有稀疏的阴毛")
         if half_body:
